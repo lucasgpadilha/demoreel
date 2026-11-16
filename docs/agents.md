@@ -85,10 +85,10 @@ Limits: ≤ 40 segments, ≤ 300 s per highlight, each segment ≥ 0.25 s and in
 
 ## Example session
 
-> **User:** In the last match, make Tavinho's pistol-round clutch punchier and send me the clip.
+> **User:** In the last match, make Juca's pistol-round clutch punchier and send me the clip.
 >
 > 1. `list_matches(limit=1)` → `m_cdaf…`
-> 2. `list_highlights(match_id, player="tavinho")` → `h_fa6d…` "1v2 clutch + 2K (Glock-18)", 10.1 s
+> 2. `list_highlights(match_id, player="juca")` → `h_fa6d…` "1v2 clutch + 2K (Glock-18)", 10.1 s
 > 3. `get_highlight("h_fa6d…")` → one segment 74137–74782, kills at 74393 and 74622
 > 4. `edit_highlight("h_fa6d…", ops=[trim start +1s, split at 74560, set_speed segment 1 → 0.5, caption])`
 > 5. `render_highlight("h_fa6d…", wait_seconds=90)` → `video_url`
