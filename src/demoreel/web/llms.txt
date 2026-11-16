@@ -1,0 +1,47 @@
+# demoreel
+
+> Upload a Counter-Strike 2 demo (.dem) and get match metrics plus automatically generated highlight
+> videos. Everything is asynchronous and scriptable: REST API, webhooks, and an MCP server for LLM agents.
+
+Base URL: {BASE_URL}
+
+## Fastest path for an agent
+
+- Prefer the MCP server at {BASE_URL}/mcp (Streamable HTTP). It exposes compact tools for everything below
+  and its `instructions` explain the concepts. Local clients can run `demoreel mcp` (stdio) instead.
+- Otherwise use the REST API. Contract: {BASE_URL}/openapi.json · interactive docs: {BASE_URL}/docs
+- If the server has an API key, send `Authorization: Bearer <key>` (or `X-API-Key`).
+
+## REST flow
+
+1. `POST {BASE_URL}/api/v1/matches` — multipart, field `file` (.dem, optionally .gz/.bz2/.zst/.zip).
+   Returns 202 `{match, job, created}`. Same demo twice → same match (`created: false`).
+2. `GET {BASE_URL}/api/v1/jobs/{job_id}?wait=30` — long-poll until `done` is true. Do not poll in a tight loop.
+3. Read results:
+   - `GET /api/v1/matches/{id}/scoreboard` — compact per-player table
+   - `GET /api/v1/matches/{id}/players` · `/rounds` · `/rounds/{n}` · `/kills?attacker=&weapon=&headshot=`
+   - `GET /api/v1/matches/{id}/analysis` — everything in one (large) document
+   - `GET /api/v1/matches/{id}/highlights` — best first, each with its rendered videos (`video_url`)
+4. Edit a highlight: `POST /api/v1/highlights/{id}/edit` with `{"ops": [...]}` (all-or-nothing):
+   `trim`, `set_range`, `set_pov`, `set_speed`, `set_caption`, `add_segment`, `remove_segment`,
+   `move_segment`, `split_segment`, `set_meta`. Or create one: `POST /api/v1/matches/{id}/highlights`.
+5. Render: `POST /api/v1/highlights/{id}/renders` `{"renderer": "auto" | "radar" | "ingame"}` → 202
+   `{render, job}`; long-poll the job; then `GET /api/v1/renders/{id}` → `video_url`.
+   Several highlights in one video: `POST /api/v1/matches/{id}/reels`.
+6. Optional: `POST /api/v1/webhooks` to be called on `match.ready`, `render.ready`, etc.
+7. Across matches (all GET; filters `night=YYYY-MM-DD`, `match_id`, `since`, `until`; none = every match):
+   `/api/v1/insights/nights` · `/insights/rivalries` (who kills whom, nemesis / favourite victim) ·
+   `/insights/players` · `/insights/players/{steamid}` · `/insights/trophies` (one match or one night) ·
+   `/insights/chat` (banter rankings of the all-chat, not moderation).
+
+## Concepts
+
+- Ticks: demo time unit. seconds = ticks / tickrate (64 in CS2). Every tick field is absolute within the demo.
+- Highlight: ordered `segments`, each `{start_tick, end_tick, pov_steamid, speed, caption}`.
+  `speed` 0.5 = slow motion. `pov_steamid: null` = overview camera.
+- Editing never alters existing videos; they get `stale: true`. Render again to apply the edit.
+- Renderers: `ingame` = real CS2 footage from the player's point of view (needs a machine with the game);
+  `radar` = 2D tactical replay that runs anywhere; `auto` picks in-game when available.
+  `GET /api/v1/capabilities` tells which are available on this server and why not.
+- SteamIDs are strings. Team keys are `team_a` (started CT) and `team_b`.
+- Errors: 4xx with `{"detail": "..."}` written to be actionable.

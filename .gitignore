@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Runtime data (uploads, database, rendered videos, cached radars)
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Demos are large and contain player names / SteamIDs — never commit them
+demos/
+*.dem
+*.dem.zip
+*.dem.bz2
+*.dem.gz
+
+# Env / editor
+.env
+.vscode/
+.idea/
+.claude/
