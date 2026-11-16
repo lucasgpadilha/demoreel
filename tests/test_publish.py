@@ -90,6 +90,16 @@ def test_only_what_a_mirror_shows_is_sent(instance):
     assert missing == ["renders/gone.mp4"] and (matches, renders) == (1, 3)
 
 
+def test_a_video_deleted_here_but_still_listed_stays_on_the_mirror(instance):
+    snap = publish.snapshot_database(instance / "snapshot.db")
+    files, missing, _, _ = publish.wanted_files(snap, instance)
+    there = ["renders/r1.mp4", "renders/gone.mp4", "renders/unlisted.mp4", "matches/old/analysis.json",
+             "brands/kit/logo.png", "demoreel.db"]
+    # gone.mp4 is listed by the database: the mirror's copy may be the only one, so it is not pruned
+    assert publish.stale_files(there, files, missing) == ["matches/old/analysis.json", "renders/unlisted.mp4"]
+    assert publish.stale_files(["renders/a.mp4"], [], ["renders\\a.mp4"]) == []  # paths stored on Windows
+
+
 def test_another_database_engine_is_refused_with_a_reason(instance, monkeypatch):
     monkeypatch.setenv("DEMOREEL_DATABASE_URL", "postgresql+psycopg://u@h/db")
     get_settings.cache_clear()

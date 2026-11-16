@@ -164,6 +164,13 @@ def wanted_files(snapshot: Path, data_dir: Path) -> tuple[dict[str, Path], list[
     return files, missing, matches, renders
 
 
+def stale_files(there: Iterable[str], files: Iterable[str], missing: Iterable[str]) -> list[str]:
+    """What pruning removes from the mirror: videos and analyses the database no longer lists. A video the
+    database lists but this disk no longer has is kept: the mirror's copy may be the only one left."""
+    keep = set(files) | {str(m).replace("\\", "/") for m in missing}
+    return sorted(rel for rel in there if rel not in keep and rel.startswith(("renders/", "matches/")))
+
+
 def _remote_listing(target: Target) -> dict[str, int]:
     q = shlex.quote(target.path)
     out = _ssh(target, f"mkdir -p {q}/renders {q}/matches {q}/brands && cd {q} && "
@@ -233,7 +240,7 @@ def publish(target: str | None = None, *, restart: str | None = None, dry_run: b
         progress(f"{plan.matches} matches, {plan.renders} videos, {plan.files} files ({plan.bytes / 1e9:.2f} GB)")
         there = _remote_listing(where)
         todo = [(rel, p) for rel, p in sorted(files.items()) if there.get(rel) != p.stat().st_size]
-        stale = sorted(rel for rel in there if rel not in files and rel.startswith(("renders/", "matches/")))
+        stale = stale_files(there, files, plan.missing)
         total = sum(p.stat().st_size for _, p in todo)
         progress(f"to send: {len(todo)} files ({total / 1e9:.2f} GB); stale on the server: {len(stale)}")
         if dry_run:

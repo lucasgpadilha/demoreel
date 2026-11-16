@@ -209,7 +209,8 @@ def publish(
                f"{plan.matches} matches and {plan.renders} videos.")
     if plan.missing:
         typer.secho(f"{len(plan.missing)} file(s) listed by the database are not on this disk, e.g. "
-                    f"{plan.missing[0]}. Those videos will not play on the mirror until they are made again.",
+                    f"{plan.missing[0]}. The mirror keeps the copies it already has; a video it never received "
+                    "will not play there until it is made again.",
                     fg=typer.colors.YELLOW, err=True)
 
 

@@ -26,7 +26,9 @@ recording machine and publish; changes made directly on the mirror are lost at t
 
 Files are compared by size and sent as a tar stream over SSH; an interrupted run is simply run again. The
 order is files, then the database, then removal of videos the mirror no longer lists - so the mirror never
-shows a video it does not have. It needs the `ssh` client here and `find`, `tar`, `mv`, `rm` there.
+shows a video it does not have. A video the database still lists is never removed from the mirror, also when
+its file was deleted here to free disk space: the mirror's copy may be the only one left. It needs the `ssh`
+client here and `find`, `tar`, `mv`, `rm` there.
 
 ```bash
 demoreel publish --target demoreel@mirror.example.org:/srv/demoreel/data \
