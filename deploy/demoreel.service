@@ -1,0 +1,25 @@
+# systemd unit of a read-only mirror: the API, the UI and the videos, no workers.
+# Settings live in /etc/demoreel/demoreel.env (see deploy/demoreel.env.example).
+
+[Unit]
+Description=demoreel (read-only mirror: API, UI and videos)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=demoreel
+Group=demoreel
+WorkingDirectory=/opt/demoreel/app
+EnvironmentFile=/etc/demoreel/demoreel.env
+ExecStart=/opt/demoreel/app/.venv/bin/demoreel serve --workers 0
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=full
+# uv keeps the Python it downloads under the user's home: it has to stay readable.
+ProtectHome=read-only
+PrivateTmp=true
+MemoryMax=600M
+
+[Install]
+WantedBy=multi-user.target

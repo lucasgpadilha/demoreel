@@ -1,0 +1,19 @@
+# docker compose up --build   ->   http://localhost:8000
+services:
+  demoreel:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Links returned by the API / MCP tools use this base URL.
+      DEMOREEL_PUBLIC_URL: ${DEMOREEL_PUBLIC_URL:-http://localhost:8000}
+      # Set a key before exposing the service beyond your machine.
+      DEMOREEL_API_KEY: ${DEMOREEL_API_KEY:-}
+      DEMOREEL_WORKERS: ${DEMOREEL_WORKERS:-1}
+      DEMOREEL_AUTO_RENDER_TOP: ${DEMOREEL_AUTO_RENDER_TOP:-3}
+    volumes:
+      - demoreel-data:/data
+    restart: unless-stopped
+
+volumes:
+  demoreel-data:
