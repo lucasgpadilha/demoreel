@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     max_upload_mb: int = 2048
 
     workers: int = Field(1, description="Worker processes started by `demoreel serve`.")
+    worker_max_file_mb: int = Field(1024, description="Largest file a remote worker may send back (a finished "
+                                                      "video). See docs/workers.md.")
     default_renderer: str = Field("auto", description="'auto' = in-game POV when available, else 2D radar.")
     auto_render_top: int = Field(3, description="Automatically render the N best highlights after analysis.")
     render_width: int = 1280

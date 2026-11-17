@@ -91,8 +91,8 @@ def _ssh(target: Target, command: str, *, stdin: bytes | None = None, timeout: f
 
 def snapshot_database(out: Path) -> Path:
     """A consistent copy of the SQLite database holding only what a mirror shows: matches, highlights and
-    finished videos. Jobs, webhooks (they carry secrets) and unfinished renders are left out, and so are the
-    videos of renderers not in ``DEMOREEL_PUBLISH_RENDERERS`` when it is set."""
+    finished videos. Jobs, webhooks and remote workers (they carry secrets) and unfinished renders are left out,
+    and so are the videos of renderers not in ``DEMOREEL_PUBLISH_RENDERERS`` when it is set."""
     settings = get_settings()
     keep = settings.publish_renderers
     if keep is not None:
@@ -115,6 +115,9 @@ def snapshot_database(out: Path) -> Path:
             src.backup(dst)
             dst.execute("DELETE FROM jobs")
             dst.execute("DELETE FROM webhooks")
+            for table in ("worker_masters", "workers"):  # token hashes stay here; older databases have neither
+                if dst.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                    dst.execute(f"DELETE FROM {table}")
             dst.execute("DELETE FROM renders WHERE status != 'ready'")
             if keep is not None:
                 dst.execute(f"DELETE FROM renders WHERE renderer NOT IN ({','.join('?' * len(keep))})", keep)

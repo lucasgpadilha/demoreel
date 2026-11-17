@@ -28,7 +28,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from . import __version__, insights, jobs, service
+from . import __version__, insights, jobs, service, workers
 from .analysis.schema import KillEvent, MatchAnalysis, PlayerStats, RoundSummary
 from .config import get_settings
 from .db import Job, Webhook, init_db, session_scope
@@ -59,6 +59,13 @@ from .schemas import (
     UploadResult,
     WebhookIn,
     WebhookOut,
+    WorkerClaim,
+    WorkerCreate,
+    WorkerCreated,
+    WorkerFinish,
+    WorkerMasters,
+    WorkerOut,
+    WorkerProgress,
 )
 from .webhooks import EVENTS
 
@@ -524,6 +531,115 @@ def delete_webhook(webhook_id: str) -> None:
         s.delete(w)
 
 
+# ------------------------------------------------------------------------------------------- remote workers
+# Two sides. The organiser registers and removes workers (below, on the main router). The worker itself talks
+# to /api/v1/worker/* with its own token: those routes do not accept the organiser's key, and a worker token
+# opens nothing else. See docs/workers.md.
+
+@api.get("/workers", response_model=list[WorkerOut], tags=["workers"],
+         summary="Remote workers registered on this server (organiser only)")
+def list_remote_workers(request: Request) -> list[WorkerOut]:
+    if not is_admin(request):
+        raise HTTPException(403, "Only the organiser can see the workers (send the organiser's key).")
+    with session_scope() as s:
+        return [workers.worker_out(s, w) for w in workers.list_workers(s)]
+
+
+@api.post("/workers", response_model=WorkerCreated, status_code=201, tags=["workers"],
+          summary="Register a remote worker; the answer carries its token, shown only this once")
+def create_remote_worker(body: WorkerCreate) -> WorkerCreated:
+    with session_scope() as s:
+        w, token = workers.create_worker(s, body.name, body.capabilities)
+        return WorkerCreated(worker=workers.worker_out(s, w), token=token)
+
+
+@api.delete("/workers/{name_or_id}", status_code=204, tags=["workers"],
+            summary="Remove a worker: its token stops working at once")
+def delete_remote_worker(name_or_id: str) -> None:
+    with session_scope() as s:
+        workers.remove_worker(s, name_or_id)
+
+
+def current_worker(request: Request) -> str:
+    """Id of the worker whose token this request carries."""
+    with session_scope() as s:
+        return workers.authenticate(s, _given_key(request)).id
+
+
+worker_api = APIRouter(prefix="/api/v1/worker", tags=["worker protocol"])
+WorkerId = Annotated[str, Depends(current_worker)]
+
+
+@worker_api.get("/me", response_model=WorkerOut, summary="Who this token is (a quick way to test it)")
+def worker_me(worker_id: WorkerId) -> WorkerOut:
+    with session_scope() as s:
+        return workers.worker_out(s, workers.get_worker(s, worker_id))
+
+
+@worker_api.post("/claim", summary="Take the next job this worker can run (204 when there is none)",
+                 responses={204: {"description": "Nothing to do right now."}})
+def worker_claim(body: WorkerClaim, worker_id: WorkerId):
+    spec = workers.claim(worker_id, body.capabilities, body.info)
+    return spec if spec is not None else Response(status_code=204)
+
+
+@worker_api.post("/jobs/{job_id}/heartbeat",
+                 summary="Say the job is alive and how far it is; the answer says when to stop")
+def worker_heartbeat(job_id: str, body: WorkerProgress, worker_id: WorkerId) -> dict[str, Any]:
+    with session_scope() as s:
+        return workers.heartbeat(s, worker_id, job_id, body.progress, body.message)
+
+
+@worker_api.put("/jobs/{job_id}/files/{name}",
+                summary="Send one result file (raw body; its SHA-256 goes in X-Content-SHA256)")
+async def worker_upload(job_id: str, name: str, request: Request, worker_id: WorkerId) -> dict[str, Any]:
+    with session_scope() as s:
+        upload = workers.open_upload(s, worker_id, job_id, name, request.headers.get("x-content-sha256"))
+    try:
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > upload.limit:  # answer before reading the body
+            raise workers.TooLarge(f"{name} is {int(declared) // workers.MB} MB; this server accepts up to "
+                                   f"{upload.limit // workers.MB} MB for it.")
+        async for chunk in request.stream():
+            upload.write(chunk)
+    except Exception:  # too large, or the connection dropped: leave no half file behind
+        upload.abort()
+        raise
+    return upload.close()
+
+
+@worker_api.get("/jobs/{job_id}/files/{name}", summary="Fetch an input of the job: demo.dem or analysis.json")
+def worker_download(job_id: str, name: str, worker_id: WorkerId):
+    with session_scope() as s:
+        path = workers.input_file(s, worker_id, job_id, name)
+    return FileResponse(path, filename=name)
+
+
+@worker_api.get("/jobs/{job_id}/brand", summary="The brand kit of the job's match: its files, sizes and hashes")
+def worker_brand(job_id: str, worker_id: WorkerId) -> dict[str, Any]:
+    with session_scope() as s:
+        return workers.brand_manifest(s, worker_id, job_id)
+
+
+@worker_api.get("/jobs/{job_id}/brand/{path:path}", summary="One file of that brand kit")
+def worker_brand_file(job_id: str, path: str, worker_id: WorkerId):
+    with session_scope() as s:
+        target = workers.brand_file(s, worker_id, job_id, path)
+    return FileResponse(target)
+
+
+@worker_api.post("/jobs/{job_id}/finish", response_model=JobOut,
+                 summary="Close the job: succeeded (after its files were sent), failed, canceled or released")
+def worker_finish(job_id: str, body: WorkerFinish, worker_id: WorkerId) -> JobOut:
+    return workers.finish(worker_id, job_id, body)
+
+
+@worker_api.put("/masters", summary="Tell the server every recording this worker keeps (replaces the list)")
+def worker_masters(body: WorkerMasters, worker_id: WorkerId) -> dict[str, int]:
+    with session_scope() as s:
+        return {"masters": workers.sync_masters(s, workers.get_worker(s, worker_id), body.masters, replace=True)}
+
+
 # ------------------------------------------------------------------------------------------- insights
 
 def _insight_scope(
@@ -598,7 +714,10 @@ class _GzipApi:
         self.gzip = GZipMiddleware(app, minimum_size=1024)
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and scope.get("path", "").startswith("/api/"):
+        path = scope.get("path", "") if scope["type"] == "http" else ""
+        # ...nor the files a remote worker fetches (a demo is hundreds of MB).
+        worker_file = path.startswith("/api/v1/worker/jobs/") and ("/files/" in path or "/brand/" in path)
+        if path.startswith("/api/") and not worker_file:
             await self.gzip(scope, receive, send)
         else:
             await self.app(scope, receive, send)
@@ -746,6 +865,7 @@ def create_app() -> FastAPI:
         return response
 
     app.include_router(api)
+    app.include_router(worker_api)
     if mcp_app is not None:
         app.mount("/mcp", mcp_app)
     if (WEB_DIR / "index.html").exists():

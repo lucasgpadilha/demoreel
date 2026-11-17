@@ -15,7 +15,7 @@ from .analysis import analyze_demo
 from .brand import brand_for
 from .compose.pipeline import finish
 from .config import get_settings
-from .db import Highlight, Render, now, session_scope
+from .db import Highlight, session_scope
 from .render import Clip, ClipSegment, RenderJob, RenderOptions, get_renderer
 from .render.base import RenderCancelled, RenderError
 from .schemas import RenderOptionsIn
@@ -40,13 +40,11 @@ def _discard(*paths: Path | None) -> None:
 
 @jobs.handler("analyze_match")
 def analyze_match(ctx: jobs.JobContext) -> dict[str, Any]:
-    settings = get_settings()
     match_id = ctx.payload["match_id"]
     with session_scope() as s:
         m = service.get_match(s, match_id)
         m.status, m.error = "analyzing", None
         demo_path = service.abs_path(m.demo_path)
-        opts = dict(m.options or {})
     ctx.progress(0.05, "Parsing demo")
     try:
         analysis = analyze_demo(demo_path)
@@ -58,46 +56,12 @@ def analyze_match(ctx: jobs.JobContext) -> dict[str, Any]:
         raise
     ctx.progress(0.8, "Saving analysis")
 
-    rel = f"matches/{match_id}/analysis.json"
-    settings.path(*rel.split("/")).write_text(analysis.model_dump_json(), encoding="utf-8")
-    render_jobs: list[str] = []
     with session_scope() as s:
-        m = service.get_match(s, match_id)
-        m.analysis_path, m.status, m.analyzed_at = rel, "ready", now()
-        m.map, m.server_name = analysis.map, analysis.server_name
-        m.team_a_name, m.team_a_score = analysis.team_a.name, analysis.team_a.score
-        m.team_b_name, m.team_b_score = analysis.team_b.name, analysis.team_b.score
-        m.rounds, m.duration_s = analysis.rounds_played, analysis.duration_s
-        m.tickrate, m.total_ticks = analysis.tickrate, analysis.total_ticks
-        created: list[Highlight] = []
-        if s.scalars(select(Highlight.id).where(Highlight.match_id == match_id)).first() is not None:
-            # Re-analysis: the plays keep their ids (and so their videos); cuts and scores follow the new
-            # analysis, except where a person or an agent edited them.
-            s.flush()
-            service.rescore_match(s, match_id)
-        else:
-            for c in [*analysis.highlights, *analysis.fails]:
-                h = Highlight(match_id=match_id, kind=c.kind, title=c.title, description=c.description, origin="auto")
-                service.apply_candidate(h, c)
-                s.add(h)
-                created.append(h)
-            s.flush()
-            created.sort(key=lambda h: (h.featured_rank or 10**6, -h.score))  # auto-render the featured plays first
-
-        top = opts.get("auto_render_top")
-        top = settings.auto_render_top if top is None else int(top)
-        for h in created[: max(0, top)]:
-            try:
-                _, job = service.create_render(s, match_id, [h.id], renderer=opts.get("renderer"), priority=200)
-                render_jobs.append(job.id)
-            except service.ServiceError as exc:
-                log.warning("auto-render skipped for %s: %s", h.id, exc.message)
-        highlight_count = len(created)
-
-    emit("match.ready", {"match_id": match_id, "map": analysis.map, "highlights": highlight_count,
-                         "score": [analysis.team_a.score, analysis.team_b.score]})
-    return {"match_id": match_id, "map": analysis.map, "rounds": analysis.rounds_played,
-            "highlights": highlight_count, "render_job_ids": render_jobs, "warnings": analysis.warnings}
+        result = service.store_analysis(s, match_id, analysis)
+    score = result.pop("score")
+    emit("match.ready", {"match_id": match_id, "map": result["map"], "highlights": result["highlights"],
+                         "score": score})
+    return result
 
 
 @jobs.handler("import_remote")
@@ -268,14 +232,7 @@ def capture_match(ctx: jobs.JobContext) -> dict[str, Any]:
     then = ctx.payload.get("then") or {}
     if then.get("formats"):
         with session_scope() as s:
-            for hid in ctx.payload["highlight_ids"]:
-                for fmt in then["formats"]:
-                    try:
-                        service.create_render(s, match_id, [hid], renderer="ingame",
-                                              options=RenderOptionsIn(format=fmt), priority=150)
-                        queued += 1
-                    except service.ServiceError as exc:
-                        log.warning("render not queued for %s (%s): %s", hid, fmt, exc.message)
+            queued = service.queue_after_capture(s, match_id, ctx.payload["highlight_ids"], then["formats"])
     return {"match_id": match_id, "plays": len(clips), "renders_queued": queued, **details}
 
 
@@ -357,22 +314,17 @@ def render(ctx: jobs.JobContext) -> dict[str, Any]:
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
+    marks = extra_details.get("kill_marks")
+    if marks is not None:  # body time -> video time
+        offset = float(composed.get("body_offset_s") or 0.0)
+        marks = [{"tick": int(m["tick"]), "t": float(m["t"]) + offset} for m in marks]
     with session_scope() as s:
-        r = s.get(Render, render_id)
-        if r is None:  # the render was deleted while it was being produced: that is a cancellation, not a failure
+        done = service.finish_render(s, render_id, duration_s=duration, width=out_w, height=out_h, fps=out_fps,
+                                     body_offset_s=composed.get("body_offset_s"), kill_marks=marks)
+        if done is None:  # the render was deleted while it was being produced: a cancellation, not a failure
             _discard(final_path, job.thumbnail_path)
             raise jobs.JobCancelled()
-        r.status, r.finished_at = "ready", now()
-        r.video_path = video_rel
-        r.thumbnail_path = thumb_rel if job.thumbnail_path and job.thumbnail_path.exists() else None
-        r.duration_s, r.width, r.height, r.fps = round(duration, 2), out_w, out_h, out_fps
-        r.size_bytes = final_path.stat().st_size
-        r.body_offset_s = composed.get("body_offset_s")
-        marks = extra_details.get("kill_marks")
-        if marks is not None:  # body time -> video time
-            offset = float(composed.get("body_offset_s") or 0.0)
-            r.kill_marks = [{"tick": int(m["tick"]), "t": round(float(m["t"]) + offset, 3)} for m in marks]
-        out = service.render_out(s, r).model_dump(mode="json")
+        out = done.model_dump(mode="json")
     emit("render.ready", {"render_id": render_id, "match_id": out["match_id"], "kind": kind,
                           "video_url": out["video_url"], "thumbnail_url": out["thumbnail_url"],
                           "duration_s": out["duration_s"]})

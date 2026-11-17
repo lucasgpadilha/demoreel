@@ -10,6 +10,7 @@ import bz2
 import gzip
 import hashlib
 import hmac
+import logging
 import shutil
 import time
 import zipfile
@@ -41,6 +42,8 @@ from .schemas import (
     RenderOut,
     TeamScore,
 )
+
+log = logging.getLogger("demoreel.service")
 
 CS2_MAGIC = b"PBDEMS2\x00"
 CSGO_MAGIC = b"HL2DEMO\x00"
@@ -623,44 +626,68 @@ def renderers_status() -> list[dict[str, Any]]:
 
     out = describe_renderers()
     if not get_settings().ingame_enabled:
+        from . import workers
+
+        with session_scope() as s:
+            remote = workers.recording_workers(s)
         for r in out:
             if r["name"] == "ingame":
                 r["details"] = {**r.get("details", {}), "machine_ready": r["available"]}
+                if remote:
+                    # Nothing records here, but a remote worker with the game takes those jobs.
+                    r["available"], r["reason"] = True, None
+                    r["details"]["remote_workers"] = remote
+                    continue
                 r["available"] = False
                 r["reason"] = ("Disabled on this server. Set DEMOREEL_INGAME_ENABLED=1 on a machine with CS2 "
-                               "(see docs/ingame-recording.md)."
+                               "(see docs/ingame-recording.md), or register a remote worker that has the game "
+                               "(see docs/workers.md)."
                                + ("" if r["details"]["machine_ready"] else f" Also: {r['reason']}"))
     return out
 
 
+def records_here() -> bool:
+    """True when this machine itself can record with the game."""
+    if not get_settings().ingame_enabled:
+        return False
+    try:
+        from .render import get_renderer
+
+        return bool(get_renderer("ingame").availability().ok)
+    except Exception:  # noqa: BLE001 - a broken optional renderer must not break render requests
+        return False
+
+
 def resolve_renderer(name: str | None) -> str:
     """Turn 'auto'/None into a concrete renderer and make sure this deployment can run it."""
-    from .render import CAPABILITY, get_renderer
+    from . import workers
+    from .render import CAPABILITY
 
     settings = get_settings()
     name = (name or settings.default_renderer or "auto").lower()
     if name == "auto":
-        if settings.ingame_enabled:
-            try:
-                if get_renderer("ingame").availability().ok:
-                    return "ingame"
-            except Exception:  # noqa: BLE001 - fall back to the always-available renderer
-                pass
-        return "radar"
+        return "ingame" if records_here() else "radar"
     if name not in CAPABILITY:
         raise ServiceError(f"Unknown renderer {name!r}. Use one of: auto, {', '.join(CAPABILITY)}.")
     if name == "ingame" and not settings.ingame_enabled:
-        raise Conflict("The in-game renderer is disabled on this server. Set DEMOREEL_INGAME_ENABLED=1 on a "
-                       "machine with CS2 installed (see docs/ingame-recording.md), or use renderer='radar'.")
+        with session_scope() as s:
+            remote = workers.recording_workers(s)
+        if not remote:
+            raise Conflict("The in-game renderer is disabled on this server. Set DEMOREEL_INGAME_ENABLED=1 on a "
+                           "machine with CS2 installed (see docs/ingame-recording.md), register a remote worker "
+                           "that has the game (see docs/workers.md), or use renderer='radar'.")
     return name
 
 
-def _plan_renderer(m: Match, highlights: list[Highlight], renderer: str | None,
-                   opts: RenderOptionsIn) -> tuple[str, str]:
-    """Pick the renderer and the kind of worker that can run the job.
+def _plan_renderer(s: Session, m: Match, highlights: list[Highlight], renderer: str | None,
+                   opts: RenderOptionsIn) -> tuple[str, str, str | None]:
+    """Pick the renderer, the kind of worker that can run the job and - when only one remote worker can,
+    because it keeps the footage - that worker's id.
 
     First-person footage that was already recorded is kept as a *master*; a render that such a master covers
-    needs no game at all, so it runs on any worker — even when in-game recording is disabled here."""
+    needs no game at all, so it runs on any worker — even when in-game recording is disabled here. Footage a
+    remote worker keeps counts too: the job is then addressed to that worker."""
+    from . import workers
     from .compose import master as masters
     from .render import CAPABILITY
     from .render.base import ClipSegment
@@ -670,7 +697,7 @@ def _plan_renderer(m: Match, highlights: list[Highlight], renderer: str | None,
     if want not in {"auto", *CAPABILITY}:
         raise ServiceError(f"Unknown renderer {want!r}. Use one of: auto, {', '.join(CAPABILITY)}.")
     if want == "radar":
-        return "radar", CAPABILITY["radar"]
+        return "radar", CAPABILITY["radar"], None
     segments = [ClipSegment(x["start_tick"], x["end_tick"], x.get("pov_steamid"), float(x.get("speed") or 1.0))
                 for h in highlights for x in (h.segments or [])]
     need = masters.capture_fps_for(segments, opts.fps or settings.render_fps)
@@ -683,22 +710,21 @@ def _plan_renderer(m: Match, highlights: list[Highlight], renderer: str | None,
           "kills": kills, "tickrate": float(m.tickrate or 64)}
     recapture = bool(opts.extra.get("ingame_recapture"))
     if not recapture and masters.find_master(m.id, segments, min_fps=need, **kw) is not None:
-        return "ingame", "cpu"  # footage on disk: no game needed
-    can_record = False
-    if settings.ingame_enabled:
-        try:
-            from .render import get_renderer
-
-            can_record = get_renderer("ingame").availability().ok
-        except Exception:  # noqa: BLE001 - a broken optional renderer must not break render requests
-            can_record = False
-    if can_record:
-        return "ingame", CAPABILITY["ingame"]
+        return "ingame", "cpu", None  # footage on disk: no game needed
+    if not recapture:
+        holder = workers.footage_holder(s, m.id, segments, min_fps=need, **kw)
+        if holder is not None:
+            return "ingame", "cpu", holder  # footage on a remote worker: it edits, no game needed
+    if records_here() or workers.recording_workers(s):
+        return "ingame", CAPABILITY["ingame"], None
     if masters.find_master(m.id, segments, min_fps=need, allow_lower_fps=True, **kw) is not None:
-        return "ingame", "cpu"  # usable footage at a lower frame rate
+        return "ingame", "cpu", None  # usable footage at a lower frame rate
+    holder = workers.footage_holder(s, m.id, segments, min_fps=need, allow_lower_fps=True, **kw)
+    if holder is not None:
+        return "ingame", "cpu", holder
     if want == "auto":
-        return "radar", CAPABILITY["radar"]
-    return resolve_renderer("ingame"), CAPABILITY["ingame"]  # raises the "disabled on this server" conflict
+        return "radar", CAPABILITY["radar"], None
+    return resolve_renderer("ingame"), CAPABILITY["ingame"], None  # raises the "disabled on this server" conflict
 
 
 def create_render(s: Session, match_id: str, highlight_ids: list[str], *, renderer: str | None = None,
@@ -715,14 +741,14 @@ def create_render(s: Session, match_id: str, highlight_ids: list[str], *, render
             raise NotFound(f"Highlight {hid!r} not found in match {m.id}.")
     opts_in = options or RenderOptionsIn()
     opts = opts_in.model_dump(exclude_none=True)
-    name, capability = _plan_renderer(m, [rows[h] for h in highlight_ids], renderer, opts_in)
+    name, capability, target = _plan_renderer(s, m, [rows[h] for h in highlight_ids], renderer, opts_in)
     render = Render(match_id=m.id, kind=kind, title=title or (rows[highlight_ids[0]].title if kind == "highlight" else None),
                     highlight_ids=list(highlight_ids), highlight_versions={hid: rows[hid].version for hid in highlight_ids},
                     renderer=name, options=opts)
     s.add(render)
     s.flush()
     job = jobs.enqueue(s, "render", {"render_id": render.id}, capability=capability, match_id=m.id,
-                       render_id=render.id, priority=priority)
+                       render_id=render.id, priority=priority, target_worker=target)
     render.job_id = job.id
     return render, job
 
@@ -732,6 +758,87 @@ def get_render(s: Session, render_id: str) -> Render:
     if r is None:
         raise NotFound(f"Render {render_id!r} not found.")
     return r
+
+
+# ---------------------------------------------------------------- results of jobs, applied to the database
+# A job has two halves: the heavy work (parse a demo, record, edit) and writing down what came out of it.
+# The second half lives here so that it is the same whether the work ran on this machine or on a remote worker.
+
+def store_analysis(s: Session, match_id: str, analysis: MatchAnalysis) -> dict[str, Any]:
+    """Save a finished analysis: the JSON on disk, the match row, its plays, and the videos made automatically.
+    Returns the job result. A re-analysis keeps the plays' ids (and so their videos)."""
+    settings = get_settings()
+    m = get_match(s, match_id)
+    opts = dict(m.options or {})
+    rel = f"matches/{match_id}/analysis.json"
+    settings.path(*rel.split("/")).write_text(analysis.model_dump_json(), encoding="utf-8")
+    m.analysis_path, m.status, m.analyzed_at, m.error = rel, "ready", now(), None
+    m.map, m.server_name = analysis.map, analysis.server_name
+    m.team_a_name, m.team_a_score = analysis.team_a.name, analysis.team_a.score
+    m.team_b_name, m.team_b_score = analysis.team_b.name, analysis.team_b.score
+    m.rounds, m.duration_s = analysis.rounds_played, analysis.duration_s
+    m.tickrate, m.total_ticks = analysis.tickrate, analysis.total_ticks
+    created: list[Highlight] = []
+    if s.scalars(select(Highlight.id).where(Highlight.match_id == match_id)).first() is not None:
+        # Re-analysis: the plays keep their ids (and so their videos); cuts and scores follow the new
+        # analysis, except where a person or an agent edited them.
+        s.flush()
+        rescore_match(s, match_id)
+    else:
+        for c in [*analysis.highlights, *analysis.fails]:
+            h = Highlight(match_id=match_id, kind=c.kind, title=c.title, description=c.description, origin="auto")
+            apply_candidate(h, c)
+            s.add(h)
+            created.append(h)
+        s.flush()
+        created.sort(key=lambda h: (h.featured_rank or 10**6, -h.score))  # auto-render the featured plays first
+
+    render_jobs: list[str] = []
+    top = opts.get("auto_render_top")
+    top = settings.auto_render_top if top is None else int(top)
+    for h in created[: max(0, top)]:
+        try:
+            _, job = create_render(s, match_id, [h.id], renderer=opts.get("renderer"), priority=200)
+            render_jobs.append(job.id)
+        except ServiceError as exc:
+            log.warning("auto-render skipped for %s: %s", h.id, exc.message)
+    return {"match_id": match_id, "map": analysis.map, "rounds": analysis.rounds_played,
+            "highlights": len(created), "render_job_ids": render_jobs, "warnings": analysis.warnings,
+            "score": [analysis.team_a.score, analysis.team_b.score]}
+
+
+def finish_render(s: Session, render_id: str, *, duration_s: float, width: int, height: int, fps: int,
+                  body_offset_s: float | None = None, kill_marks: list[dict[str, Any]] | None = None) -> RenderOut | None:
+    """Mark a video as ready. Its file (and poster) must already be at ``renders/<id>.mp4`` (``.jpg``).
+    ``kill_marks`` are in video time. Returns ``None`` when the render was deleted while it was being made."""
+    settings = get_settings()
+    r = s.get(Render, render_id)
+    if r is None:
+        return None
+    video_rel, thumb_rel = f"renders/{render_id}.mp4", f"renders/{render_id}.jpg"
+    r.status, r.finished_at, r.error = "ready", now(), None
+    r.video_path = video_rel
+    r.thumbnail_path = thumb_rel if (settings.data_dir / thumb_rel).is_file() else None
+    r.duration_s, r.width, r.height, r.fps = round(float(duration_s), 2), int(width), int(height), int(fps)
+    r.size_bytes = (settings.data_dir / video_rel).stat().st_size
+    r.body_offset_s = body_offset_s
+    if kill_marks is not None:
+        r.kill_marks = [{"tick": int(k["tick"]), "t": round(float(k["t"]), 3)} for k in kill_marks]
+    return render_out(s, r)
+
+
+def queue_after_capture(s: Session, match_id: str, highlight_ids: list[str], formats: list[str]) -> int:
+    """Queue the first-person videos of plays that were just recorded. Returns how many were queued."""
+    queued = 0
+    for hid in highlight_ids:
+        for fmt in formats:
+            try:
+                create_render(s, match_id, [hid], renderer="ingame", options=RenderOptionsIn(format=fmt),
+                              priority=150)
+                queued += 1
+            except ServiceError as exc:
+                log.warning("render not queued for %s (%s): %s", hid, fmt, exc.message)
+    return queued
 
 
 def list_renders(s: Session, match_id: str) -> list[Render]:
@@ -915,14 +1022,10 @@ def produce(s: Session, match_id: str, *, renderers: list[str], formats: list[st
     queued = skipped = 0
     to_capture: list[str] = []
     capture_formats: dict[str, list[str]] = {}
-    can_record = False
-    if "ingame" in renderers and settings.ingame_enabled:
-        try:
-            from .render import get_renderer
+    from . import workers
 
-            can_record = get_renderer("ingame").availability().ok
-        except Exception:  # noqa: BLE001
-            can_record = False
+    # Recording can happen on this machine or on a remote worker that has the game.
+    can_record = "ingame" in renderers and (records_here() or bool(workers.recording_workers(s)))
     no_footage = 0
     kw = {"width": settings.ingame_capture_width, "height": settings.ingame_capture_height, "extra": {},
           "kills": masters.xray.match_kills(analysis), "tickrate": float(m.tickrate or 64)}
@@ -931,8 +1034,10 @@ def produce(s: Session, match_id: str, *, renderers: list[str], formats: list[st
                 for x in (h.segments or [])]
         segs = [sg for c in masters.recordable([Clip_(segs)], m.total_ticks or 0) for sg in c.segments]
         need = masters.capture_fps_for(segs, settings.render_fps)
-        covered = bool(segs) and masters.find_master(match_id, segs, min_fps=need,
-                                                     allow_lower_fps=not can_record, **kw) is not None
+        covered = bool(segs) and (
+            masters.find_master(match_id, segs, min_fps=need, allow_lower_fps=not can_record, **kw) is not None
+            or workers.footage_holder(s, match_id, segs, min_fps=need, allow_lower_fps=not can_record,
+                                      **kw) is not None)
         for renderer in renderers:
             if renderer == "ingame" and h.id not in pov_ids:
                 continue
@@ -960,7 +1065,8 @@ def produce(s: Session, match_id: str, *, renderers: list[str], formats: list[st
     detail = None
     if no_footage:
         detail = (f"{no_footage} first-person video(s) were not queued: the footage has not been recorded and this "
-                  "server cannot run CS2 (set DEMOREEL_INGAME_ENABLED=1 on a machine with the game).")
+                  "server cannot run CS2 (set DEMOREEL_INGAME_ENABLED=1 on a machine with the game, or register "
+                  "a remote worker that has it: docs/workers.md).")
     return {"capture_job": capture_job, "render_jobs": queued, "pending_after_capture": pending,
             "skipped": skipped, "detail": detail, "featured": len(pov_ids) if "ingame" in renderers else 0}
 

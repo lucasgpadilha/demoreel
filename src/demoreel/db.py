@@ -141,10 +141,41 @@ class Job(Base):
     match_id: Mapped[str | None] = mapped_column(String(32), default=None, index=True)
     render_id: Mapped[str | None] = mapped_column(String(32), default=None)
     worker_id: Mapped[str | None] = mapped_column(String(64), default=None)
+    # Set when only one remote worker can run the job (it holds the footage); NULL = any worker that fits.
+    target_worker: Mapped[str | None] = mapped_column(String(32), default=None)
     heartbeat_at: Mapped[datetime | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(default=now)
     started_at: Mapped[datetime | None] = mapped_column(default=None)
     finished_at: Mapped[datetime | None] = mapped_column(default=None)
+
+
+class Worker(Base):
+    """A remote worker: another machine that takes jobs from this server over HTTPS (see docs/workers.md)."""
+
+    __tablename__ = "workers"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: new_id("w"))
+    name: Mapped[str] = mapped_column(String(64), unique=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # SHA-256; the token is never stored
+    capabilities: Mapped[list[str]] = mapped_column(JSON, default=list)  # what this worker is allowed to take
+    info: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=None)  # what it said about itself (version…)
+    created_at: Mapped[datetime] = mapped_column(default=now)
+    last_seen_at: Mapped[datetime | None] = mapped_column(default=None)
+
+
+class WorkerMaster(Base):
+    """Raw first-person footage a remote worker keeps. Only its description lives here: the server uses it to
+    know which plays can be edited again without the game, and by whom."""
+
+    __tablename__ = "worker_masters"
+    __table_args__ = (Index("ix_worker_masters_match", "match_id", "worker_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: new_id("wm"))
+    worker_id: Mapped[str] = mapped_column(ForeignKey("workers.id", ondelete="CASCADE"))
+    match_id: Mapped[str] = mapped_column(String(32))
+    master_id: Mapped[str] = mapped_column(String(32))
+    meta: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(default=now)
 
 
 class Webhook(Base):

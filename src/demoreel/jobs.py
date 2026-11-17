@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
 from .db import Job, now, session_scope
@@ -74,9 +74,10 @@ def handler(job_type: str) -> Callable[[Handler], Handler]:
 
 
 def enqueue(s: Session, job_type: str, payload: dict[str, Any], *, capability: str = "cpu", priority: int = 100,
-            match_id: str | None = None, render_id: str | None = None) -> Job:
+            match_id: str | None = None, render_id: str | None = None, target_worker: str | None = None) -> Job:
+    """``target_worker``: the id of the one remote worker that can run this job (it keeps the footage)."""
     job = Job(type=job_type, payload=payload, capability=capability, priority=priority, match_id=match_id,
-              render_id=render_id)
+              render_id=render_id, target_worker=target_worker)
     s.add(job)
     s.flush()
     return job
@@ -127,11 +128,20 @@ def _mark_target_failed(s: Session, job: Job, error: str) -> None:
             r.status, r.error, r.finished_at = "failed", error, now()
 
 
-def claim(worker_id: str, capabilities: list[str]) -> Job | None:
-    """Atomically take the next queued job this worker can run."""
+def claim(worker_id: str, capabilities: list[str], *, target: str | None = None,
+          types: list[str] | None = None) -> Job | None:
+    """Atomically take the next queued job this worker can run.
+
+    Jobs addressed to one remote worker are only handed to it (``target`` = its id); the workers of this
+    machine never take them, because the footage those jobs need is not on this disk. ``types`` narrows the
+    kinds of job taken (a remote worker cannot run the ones that write to this server's disk)."""
+    mine = Job.target_worker.is_(None) if target is None else or_(Job.target_worker.is_(None),
+                                                                   Job.target_worker == target)
+    if types is not None:
+        mine = and_(mine, Job.type.in_(types))
     with session_scope() as s:
         for _ in range(5):
-            job_id = s.scalar(select(Job.id).where(Job.status == "queued", Job.capability.in_(capabilities))
+            job_id = s.scalar(select(Job.id).where(Job.status == "queued", Job.capability.in_(capabilities), mine)
                               .order_by(Job.priority, Job.created_at).limit(1))
             if job_id is None:
                 return None
@@ -162,29 +172,37 @@ def run_one(worker_id: str, capabilities: list[str]) -> bool:
     except Exception as exc:  # noqa: BLE001 - job boundary: record and keep the worker alive
         status, error = "failed", f"{type(exc).__name__}: {exc}"
         log.error("job %s failed: %s\n%s", job.id, error, traceback.format_exc())
-    with session_scope() as s:
-        row = s.get(Job, job.id)
-        if row is not None:
-            row.status, row.result, row.error, row.finished_at = status, result, error, now()
-            if status == "succeeded":
-                row.progress, row.message = 1.0, "Done"
-            else:
-                _mark_target_failed(s, row, error or status)
-                if status == "canceled" and row.render_id:
-                    from .db import Render
+    close(job.id, status, result, error)
+    return True
 
-                    r = s.get(Render, row.render_id)
-                    if r:
-                        r.status = "canceled"
-    log.info("job %s %s", job.id, status)
+
+def close(job_id: str, status: str, result: dict[str, Any] | None, error: str | None) -> None:
+    """Record how a job ended (``succeeded``, ``failed`` or ``canceled``), mark what it was making, and tell
+    the webhooks. Used for jobs run on this machine and for jobs a remote worker reports back."""
+    with session_scope() as s:
+        row = s.get(Job, job_id)
+        if row is None:
+            return
+        row.status, row.result, row.error, row.finished_at = status, result, error, now()
+        if status == "succeeded":
+            row.progress, row.message = 1.0, "Done"
+        else:
+            _mark_target_failed(s, row, error or status)
+            if status == "canceled" and row.render_id:
+                from .db import Render
+
+                r = s.get(Render, row.render_id)
+                if r:
+                    r.status = "canceled"
+        event = {"job_id": row.id, "type": row.type, "match_id": row.match_id, "render_id": row.render_id,
+                 "result": result, "error": error}
+    log.info("job %s %s", job_id, status)
     try:
         from .webhooks import emit
 
-        emit(f"job.{status}", {"job_id": job.id, "type": job.type, "match_id": job.match_id,
-                               "render_id": job.render_id, "result": result, "error": error})
+        emit(f"job.{status}", event)
     except Exception:  # noqa: BLE001 - notifications must never break the worker
         log.exception("webhook emit failed")
-    return True
 
 
 def worker_loop(capabilities: list[str], poll_s: float = 1.0, stop: Callable[[], bool] = lambda: False) -> None:

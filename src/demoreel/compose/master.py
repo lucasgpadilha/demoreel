@@ -142,16 +142,25 @@ def picture_options(extra: dict) -> dict:
     return out
 
 
+def master_from_dict(data: dict) -> Master | None:
+    """A master from its stored description (the ``.json`` next to the footage, or what a remote worker
+    reported). ``None`` when the description is not usable."""
+    try:
+        data = dict(data)
+        data["covered"] = [Covered(**c) for c in data.get("covered", [])]
+        return Master(**data)
+    except (ValueError, TypeError):
+        return None
+
+
 def list_masters(match_id: str) -> list[Master]:
     out = []
     for f in masters_dir(match_id).glob("*.json"):
         try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-            data["covered"] = [Covered(**c) for c in data.get("covered", [])]
-            m = Master(**data)
-        except (ValueError, TypeError, OSError):
+            m = master_from_dict(json.loads(f.read_text(encoding="utf-8")))
+        except (ValueError, OSError):
             continue
-        if m.path.is_file() and m.path.stat().st_size > 0:
+        if m is not None and m.path.is_file() and m.path.stat().st_size > 0:
             out.append(m)
     return out
 
@@ -168,8 +177,17 @@ def find_master(match_id: str, segments: list[ClipSegment], *, width: int, heigh
 
     ``kills`` (the match's kill log) decides the x-ray question: footage recorded without outlines serves a
     play in "auto" mode unless that play has a kill through smoke or a wall, and the other way round."""
+    return pick_master(list_masters(match_id), segments, width=width, height=height, min_fps=min_fps, extra=extra,
+                       allow_lower_fps=allow_lower_fps, kills=kills, tickrate=tickrate)
+
+
+def pick_master(candidates: list[Master], segments: list[ClipSegment], *, width: int, height: int, min_fps: int,
+                extra: dict, allow_lower_fps: bool = False, kills: list | None = None,
+                tickrate: float = 64) -> Master | None:
+    """:func:`find_master` over a given list of captures - the ones on this disk, or the ones a remote worker
+    said it keeps."""
     want = picture_options(extra)
-    fits = [m for m in list_masters(match_id) if m.options == want and m.covers(segments)]
+    fits = [m for m in candidates if m.options == want and m.covers(segments)]
     mode = xray.mode(extra)
     if mode != "on" and xray.needed(kills, segments, tickrate):
         fits = [m for m in fits if m.xray == mode]

@@ -347,30 +347,36 @@ def test_hud_texts_come_from_the_analysis(sample_analysis):
 # ------------------------------------------------------------------------------------------- renderer choice
 
 def test_stored_footage_makes_ingame_renders_possible_without_the_game(sample_analysis):
-    from demoreel.db import Highlight, Match
+    from demoreel.db import Highlight, Match, init_db, session_scope
     from demoreel.schemas import RenderOptionsIn
 
+    init_db()
     m = Match(id="m_plantest", sha256="x", filename="x.dem", size_bytes=1, demo_path="demos/x.dem")
     h = Highlight(id="h_1", match_id=m.id, kind="ace", title="t",
                   segments=[{"start_tick": 2000, "end_tick": 2300, "pov_steamid": "ct1", "speed": 1.0}])
     opts = RenderOptionsIn()
-    assert service._plan_renderer(m, [h], "auto", opts) == ("radar", "cpu")  # nothing recorded, no game
+
+    def plan(highlight, renderer):  # (renderer, kind of worker, the one remote worker that can do it)
+        with session_scope() as s:
+            return service._plan_renderer(s, m, [highlight], renderer, opts)
+
+    assert plan(h, "auto") == ("radar", "cpu", None)  # nothing recorded, no game
     with pytest.raises(service.Conflict):
-        service._plan_renderer(m, [h], "ingame", opts)
+        plan(h, "ingame")
     video = get_settings().path("tmp", "plan-master.mp4")
     video.write_bytes(b"x" * 10)
     masters.save_master(m.id, video, width=1280, height=720, fps=30,
                         spans=[{"start_tick": 1900, "end_tick": 2400, "frames": 234}],
                         covered=[masters.Covered(1900, 2400, "ct1")], extra={})
     try:
-        assert service._plan_renderer(m, [h], "auto", opts) == ("ingame", "cpu")
-        assert service._plan_renderer(m, [h], "ingame", opts) == ("ingame", "cpu")
-        assert service._plan_renderer(m, [h], "radar", opts) == ("radar", "cpu")
+        assert plan(h, "auto") == ("ingame", "cpu", None)
+        assert plan(h, "ingame") == ("ingame", "cpu", None)
+        assert plan(h, "radar") == ("radar", "cpu", None)
         slow = Highlight(id="h_2", match_id=m.id, kind="ace", title="t",
                          segments=[{"start_tick": 2000, "end_tick": 2300, "pov_steamid": "ct1", "speed": 0.5}])
-        assert service._plan_renderer(m, [slow], "ingame", opts) == ("ingame", "cpu")  # lower-fps footage accepted
+        assert plan(slow, "ingame") == ("ingame", "cpu", None)  # lower-fps footage accepted
         with pytest.raises(service.ServiceError):
-            service._plan_renderer(m, [h], "vhs", opts)
+            plan(h, "vhs")
     finally:
         masters.delete_masters(m.id)
 

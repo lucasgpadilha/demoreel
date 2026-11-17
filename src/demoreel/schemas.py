@@ -646,3 +646,54 @@ class PlayerProfileOut(BaseModel):
     victim: RivalryRef | None = None
     chat: ChatPlayerRow | None = None
     history: list[ProfileMatch] = Field(default_factory=list, description="His matches, newest first.")
+
+
+# ---------------------------------------------------------------------------------------- remote workers
+
+class WorkerCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9 _.-]*$",
+                      description="A label for the machine, e.g. 'recording-pc'.")
+    capabilities: list[str] = Field(default_factory=lambda: ["cpu"],
+                                    description="What it may take: 'cpu' (analysis, 2D videos, editing stored "
+                                                "footage) and 'ingame' (recording with the CS2 client).")
+
+
+class WorkerOut(BaseModel):
+    id: str
+    name: str
+    capabilities: list[str]
+    created_at: UTCDateTime
+    last_seen_at: UTCDateTime | None = None
+    online: bool = Field(description="Heard from in the last few minutes.")
+    info: dict[str, Any] | None = Field(None, description="What the worker said about itself (version, system).")
+    running_job: str | None = Field(None, description="Id of the job it is working on, if any.")
+    masters: int = Field(0, description="Recordings (raw first-person footage) it keeps.")
+
+
+class WorkerCreated(BaseModel):
+    worker: WorkerOut
+    token: str = Field(description="The worker's secret. Shown only now: the server keeps a hash of it.")
+
+
+class WorkerClaim(BaseModel):
+    capabilities: list[str] = Field(default_factory=lambda: ["cpu"],
+                                    description="What the worker can take right now. Leave 'ingame' out while "
+                                                "the machine must not record (people playing on it).")
+    info: dict[str, Any] | None = Field(None, description="Version, operating system, anything worth showing.")
+
+
+class WorkerProgress(BaseModel):
+    progress: float = Field(0.0, ge=0.0, le=1.0)
+    message: str | None = Field(None, max_length=255)
+
+
+class WorkerFinish(BaseModel):
+    status: Literal["succeeded", "failed", "canceled", "released"] = Field(
+        description="'released' gives the job back untouched (e.g. players joined before recording started).")
+    result: dict[str, Any] = Field(default_factory=dict, description="What came out; fields depend on the job type.")
+    error: str | None = Field(None, max_length=2000, description="Why it failed, for a person to read.")
+    retry: bool = Field(False, description="With 'failed': put the job back in the queue instead of giving up.")
+
+
+class WorkerMasters(BaseModel):
+    masters: list[dict[str, Any]] = Field(description="Every recording the worker keeps, as its .json files say.")

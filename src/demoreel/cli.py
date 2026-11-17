@@ -214,6 +214,72 @@ def publish(
                     fg=typer.colors.YELLOW, err=True)
 
 
+workers_app = typer.Typer(no_args_is_help=True, help="Remote workers: other machines that take jobs from this "
+                                                     "server over HTTPS (docs/workers.md).")
+app.add_typer(workers_app, name="workers")
+
+
+@workers_app.command("add")
+def workers_add(
+    name: Annotated[str, typer.Argument(help="A label for the machine, e.g. recording-pc.")],
+    capability: Annotated[list[str] | None, typer.Option(
+        "--capability", "-c", help="What it may take: cpu (analysis, 2D, editing) and ingame (recording with "
+                                   "CS2). Repeat the option; default: cpu.")] = None,
+) -> None:
+    """Register a remote worker and print its token (shown only this once)."""
+    _utf8()
+    from . import service, workers
+    from .db import init_db, session_scope
+
+    init_db()
+    try:
+        with session_scope() as s:
+            w, token = workers.create_worker(s, name, capability or ["cpu"])
+            label, caps = w.name, ", ".join(w.capabilities)
+    except service.ServiceError as e:
+        typer.secho(e.message, fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from e
+    typer.echo(f"worker {label!r} registered; it may take: {caps}")
+    typer.echo("Its token (keep it secret; it is not stored and cannot be shown again):")
+    typer.echo(token)
+
+
+@workers_app.command("list")
+def workers_list() -> None:
+    """Show the registered workers and when each was last heard from."""
+    _utf8()
+    from . import workers
+    from .db import init_db, session_scope
+
+    init_db()
+    with session_scope() as s:
+        rows = [workers.worker_out(s, w) for w in workers.list_workers(s)]
+    if not rows:
+        typer.echo("No remote workers. Register one with: demoreel workers add <name> -c cpu -c ingame")
+    for w in rows:
+        seen = w.last_seen_at.strftime("%Y-%m-%d %H:%M UTC") if w.last_seen_at else "never"
+        state = "online " if w.online else "offline"
+        typer.echo(f"{state} {w.name:24} {','.join(w.capabilities):12} last seen {seen}  "
+                   f"recordings kept: {w.masters}" + (f"  working on {w.running_job}" if w.running_job else ""))
+
+
+@workers_app.command("remove")
+def workers_remove(name: Annotated[str, typer.Argument(help="Worker name or id.")]) -> None:
+    """Forget a worker: its token stops working at once."""
+    _utf8()
+    from . import service, workers
+    from .db import init_db, session_scope
+
+    init_db()
+    try:
+        with session_scope() as s:
+            gone = workers.remove_worker(s, name)
+    except service.ServiceError as e:
+        typer.secho(e.message, fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from e
+    typer.echo(f"worker {gone!r} removed")
+
+
 @app.command()
 def mcp() -> None:
     """Run the MCP server over stdio (for Claude Desktop / Claude Code and other local MCP clients)."""
