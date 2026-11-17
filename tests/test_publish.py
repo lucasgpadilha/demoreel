@@ -29,6 +29,10 @@ def instance(tmp_path, monkeypatch):
                                    ('r4', 'ready', 'j4', '../outside.mp4', NULL, 'ingame');
         INSERT INTO jobs VALUES ('j1'), ('j2');
         INSERT INTO webhooks VALUES ('w1', 'do-not-publish');
+        CREATE TABLE workers (id TEXT, token_hash TEXT);
+        CREATE TABLE worker_masters (id TEXT, worker_id TEXT);
+        INSERT INTO workers VALUES ('w_1', 'hash-of-a-token');
+        INSERT INTO worker_masters VALUES ('wm_1', 'w_1');
     """)
     db.commit()
     db.close()
@@ -56,6 +60,8 @@ def test_the_snapshot_holds_no_jobs_no_webhooks_and_only_finished_videos(instanc
     db = sqlite3.connect(snap)
     assert db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
     assert db.execute("SELECT count(*) FROM webhooks").fetchone()[0] == 0  # they carry secrets
+    assert db.execute("SELECT count(*) FROM workers").fetchone()[0] == 0  # token hashes stay home
+    assert db.execute("SELECT count(*) FROM worker_masters").fetchone()[0] == 0
     assert [r[0] for r in db.execute("SELECT id FROM renders ORDER BY id")] == ["r1", "r3", "r4"]
     assert db.execute("SELECT count(*) FROM renders WHERE job_id IS NOT NULL").fetchone()[0] == 0
     db.close()

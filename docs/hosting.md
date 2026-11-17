@@ -15,11 +15,14 @@ The mirror is read-only by design: it has no workers, `DEMOREEL_ADMIN_KEY` is se
 replaces its database with a snapshot of the recording machine's. Curate (feature, edit, delete) on the
 recording machine and publish; changes made directly on the mirror are lost at the next publish.
 
+The other way round - the server owns the queue and the database, and machines with the game take work from
+it - is described in [workers.md](workers.md). Pick one model per server.
+
 ## What `demoreel publish` copies
 
 | Copied | Never copied |
 |---|---|
-| a snapshot of the database: matches, highlights, finished videos | jobs, webhooks (they carry secrets), unfinished renders |
+| a snapshot of the database: matches, highlights, finished videos | jobs, webhooks and remote workers (they carry secrets), unfinished renders |
 | `matches/*/analysis.json` | demos (`demos/`) |
 | the videos and posters the snapshot lists (`renders/`) | masters (`masters/`), caches, orphaned files |
 | brand kits: `brand.json` and images | anything else in a kit (music, notes) |

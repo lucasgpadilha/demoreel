@@ -491,6 +491,19 @@ def build_server() -> MCPServer:
     def get_brand() -> dict[str, Any]:
         return service.brand_out().model_dump()
 
+    @mcp.tool(annotations=READ, description=(
+        "Remote workers registered on this server: the other machines that take jobs from it (typically a PC "
+        "with CS2 that records first-person footage). Shows what each may do, whether it is online, the job it "
+        "is working on and how many recordings it keeps. When first-person videos stay queued, look here: the "
+        "recording machine may be off or busy. Registering or removing a worker is done by the organiser with "
+        "`demoreel workers add|remove` - tokens are never handed out through this tool."))
+    @_threaded
+    def list_workers() -> list[dict[str, Any]]:
+        from . import workers
+
+        with session_scope() as s:
+            return [workers.worker_out(s, w).model_dump(mode="json") for w in workers.list_workers(s)]
+
     @mcp.tool(annotations=READ, description="Server capabilities: which renderers are available here and why not.")
     @_threaded
     def get_capabilities() -> dict[str, Any]:

@@ -62,8 +62,10 @@ machines without the game. Making this path boring and reliable is the top prior
   with this same actions-file + plugin + `startmovie` technique, which shows it scales
 - 🔜 Record in the background on a desktop PC: hidden / minimised game window that keeps rendering without
   focus, so the machine stays usable while clips are captured
-- 🔜 Dedicated "recorder node" mode: a PC or GPU VM that only pulls `ingame` jobs from a remote server
-  (the worker-capability model already allows it; needs packaging, docs and a remote data channel)
+- 🚧 Dedicated "recorder node" mode: a PC or GPU VM that only pulls jobs from a remote server. The server
+  side is done ([docs/workers.md](docs/workers.md): per-worker tokens, claim / heartbeat / upload / finish
+  over HTTPS, footage kept on the worker and edits addressed to it); next is the worker program itself
+  (`demoreel worker --server <url>`), with rules for when the machine may record
 - 💡 Hardware encoding (NVENC / VAAPI / AMF) and 1080p60 / 1440p presets
 - 💡 Camera options beyond POV: victim POV replay, free-cam / cinematic paths for the last kill
 
