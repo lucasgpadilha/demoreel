@@ -648,6 +648,40 @@ def test_nameplate_says_what_is_at_stake(play_analysis, sample_analysis):
     assert plain.context == "" and plain.detail and hud._nameplate_box(plain)[1:3] == ("3 kills", plain.detail)
 
 
+def test_names_with_symbols_the_brand_font_lacks_get_real_glyphs():
+    symbols, nick = "⑯✓☆", "⑯ ✓ ☆ ranzinza"  # platform badges in front of a nick: Barlow has none of them
+    mgr = skia.FontMgr()
+    if any(mgr.matchFamilyStyleCharacter("", skia.FontStyle.Normal(), ["en"], ord(ch)) is None for ch in symbols):
+        pytest.skip("no font on this machine has ⑯ ✓ ☆")
+    hud = Hud(Brand(), 1280, 720)
+    for font in (hud.f_name, hud.f_small, hud.f_caption):  # the nameplate, the teams in the corner, a caption
+        assert all(font.unicharToGlyph(ord(ch)) == 0 for ch in symbols)  # the premise: drawn as is, three empty boxes
+        runs, width = hud._runs(nick, font)
+        assert "".join(t for t, _, _ in runs) == nick and width == pytest.approx(sum(w for _, _, w in runs))
+        assert all(f.unicharToGlyph(ord(ch)) != 0 for t, f, _ in runs for ch in t if not ch.isspace())
+        assert runs[-1][1] is font and runs[-1][0].endswith("ranzinza")  # the nick itself stays in the brand's font
+        assert hud._runs("ranzinza", font) == ((("ranzinza", font, font.measureText("ranzinza")),), font.measureText("ranzinza"))
+    # on screen: three different drawings wherever a name goes, not the same box three times
+    places = {
+        "nameplate": lambda ch: hud_pixels(hud, ClipInfo(**{**INFO.__dict__, "player": ch}), t_clip=1.0)[544:608],
+        "team": lambda ch: hud_pixels(hud, ClipInfo(**{**INFO.__dict__, "team_left": ch}))[26:72],
+        "caption": lambda ch: hud_pixels(hud, INFO, caption=ch)[500:620],
+    }
+    for place, draw in places.items():
+        frames = [draw(ch) for ch in symbols]
+        assert all(f[..., 3].any() for f in frames) and len({f.tobytes() for f in frames}) == len(symbols), place
+    # what is measured is what is drawn: the plate is as wide as its name, and a long one is cut to fit
+    surface = skia.Surface(600, 120)
+    surface.getCanvas().clear(skia.ColorTRANSPARENT)
+    width = hud._text(surface.getCanvas(), nick, 10, 80, hud.f_name, skia.ColorWHITE, shadow=False)
+    cols = np.flatnonzero(surface.toarray(colorType=skia.kRGBA_8888_ColorType)[..., 3].any(axis=0))
+    assert width == hud._width(nick, hud.f_name) and 10 + width - 6 < cols.max() < 10 + width + 2
+    assert hud._nameplate_box(ClipInfo(player=nick, label="", detail="", round_text=""))[3] == pytest.approx(width + 44)
+    cut = hud._fit("☆ ✓ " * 40, hud.f_name, 300)
+    assert cut.endswith("…") and 200 < hud._width(cut, hud.f_name) <= 300
+    assert hud._nameplate_box(ClipInfo(player="⑯ ✓ ☆ " * 30, label="", detail="", round_text=""))[3] <= 1280 * 0.42 + 44
+
+
 def test_vertical_push_in_eases_in_before_the_kill_and_out_after_it():
     env = overlay._punch_env
     assert env(-0.2) == 0 and 0 < env(-0.1) < env(-0.03) < 1 and env(0) == 1 and env(0.1) == 1

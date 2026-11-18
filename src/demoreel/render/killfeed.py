@@ -121,7 +121,17 @@ class Type:
         hit = self._runs.get(key)
         if hit is not None:
             return hit
-        base = self.font(face, size)
+        result = self.split(text, self.font(face, size))
+        if len(self._runs) > 4000:
+            self._runs.clear()
+        self._runs[key] = result
+        return result
+
+    def split(self, text: str, base: skia.Font) -> tuple[tuple[tuple[str, skia.Font, float], ...], float]:
+        """``text`` set in ``base`` as (string, font, width) runs and their total width: a character ``base``
+        has no glyph for is handed to a system font that has one, at the same size. For callers that bring
+        their own font (a text all in ``base`` comes back as one run in it); not cached."""
+        size = base.getSize()
         out: list[tuple[str, skia.Font]] = []
         for ch in text:
             if ord(ch) in _INVISIBLE:
@@ -134,11 +144,7 @@ class Type:
             else:
                 out.append((ch, f))
         measured = tuple((t, f, f.measureText(t)) for t, f in out)
-        result = (measured, sum(w for _, _, w in measured))
-        if len(self._runs) > 4000:
-            self._runs.clear()
-        self._runs[key] = result
-        return result
+        return measured, sum(w for _, _, w in measured)
 
     def measure(self, text: str, face: str, size: float) -> float:
         return self.runs(text, face, size)[1]
