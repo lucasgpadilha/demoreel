@@ -89,13 +89,34 @@ class IngameRenderer:
                  resolve_slots: Callable[[Path, Iterable[int]], actions.SlotLookup] = slots.resolve_slots,
                  run_loader: Callable[..., launcher.GameRun] = launcher.run_loader,
                  is_cs2_running: Callable[[], bool | None] = procs.is_cs2_running,
-                 is_steam_running: Callable[[], bool | None] = procs.is_steam_running) -> None:
+                 is_steam_running: Callable[[], bool | None] = procs.is_steam_running,
+                 dedicated_servers: Callable[[], list[procs.GameProcess]] = procs.dedicated_servers) -> None:
         self._settings = settings
         self._run_game = run_game
         self._run_loader = run_loader
         self._resolve_slots = resolve_slots
         self._is_cs2_running = is_cs2_running
         self._is_steam_running = is_steam_running
+        self._dedicated_servers = dedicated_servers
+
+    def _shared_install(self, settings: IngameSettings) -> str | None:
+        """Why recording must not start when a dedicated server runs from the very folder the game is recorded
+        from; ``None`` when no server shares it. Servers from another copy of CS2 are no concern."""
+        if settings.cs2_dir is None:
+            return None
+        try:
+            root = settings.cs2_dir.resolve()
+            shared = [p.pid for p in self._dedicated_servers()
+                      if p.exe and Path(p.exe).resolve().is_relative_to(root)]
+        except Exception:  # noqa: BLE001 - a broken process listing must not block recording
+            return None
+        if not shared:
+            return None
+        return (f"A dedicated game server (process {', '.join(map(str, shared))}) runs from the same CS2 folder "
+                f"demoreel records with ({root}). Recording changes files of that folder for a moment "
+                "(gameinfo.gi and a plugin): a server that starts or restarts meanwhile would load them, and the "
+                "game would load the server's own add-ons. Record from a second copy of CS2 - install the game in "
+                "another Steam library and point DEMOREEL_CS2_DIR at it - or stop the server while recording.")
 
     def settings(self) -> IngameSettings:
         return self._settings if self._settings is not None else load_settings()
@@ -180,7 +201,16 @@ class IngameRenderer:
         cs2 = self._is_cs2_running()
         details["cs2_running"] = cs2
         if cs2 and not recording:
-            problems.append("CS2 is already running; close the game to record.")
+            problems.append("CS2 is already running; close the game to record. (Dedicated servers do not count; "
+                            "a cs2 process started by another user or as administrator cannot be told apart "
+                            "and is taken for the game.)")
+        try:
+            details["dedicated_servers"] = len(self._dedicated_servers())
+        except Exception:  # noqa: BLE001
+            details["dedicated_servers"] = None
+        shared = self._shared_install(settings)
+        if shared:
+            problems.append(shared)
 
         details["problems"] = problems
         return Availability(ok=not problems, reason=problems[0] if problems else "", details=details)
@@ -223,6 +253,9 @@ class IngameRenderer:
         width, height, fps = encode.even(options.width), encode.even(options.height), max(1, int(options.fps))
 
         launcher.assert_can_start(self._is_cs2_running, self._is_steam_running)
+        shared = self._shared_install(settings)
+        if shared:
+            raise RenderError(shared)
         if plugin.recover_gameinfo(settings.gameinfo_path) == "restored":
             warnings.append("gameinfo.gi was still patched from a previous run that crashed; it was restored.")
 
