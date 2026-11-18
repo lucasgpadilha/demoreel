@@ -19,6 +19,8 @@ Differences from the reference, all deliberate:
 * ``ClipSegment.speed`` is ignored - the reference has no playback-speed support in this path.
 * Ticks are clamped to the end of the demo when ``max_tick`` is known, because the plugin never runs an action
   placed after the last tick (the game would then stay open until the watchdog kills it).
+* The plugin's own panels are switched off in every take (:data:`PLUGIN_PANEL_COMMANDS`); the reference leaves
+  them as the user of CS Demo Manager set them.
 """
 
 from __future__ import annotations
@@ -57,6 +59,24 @@ MANDATORY_COMMANDS: tuple[str, ...] = (
     "cl_hud_telemetry_serverrecvmargin_graph_show 0",
     "cl_trueview_show_status 0",
     "r_show_build_info 0",
+)
+
+# The plugin draws its panels into the recorded frames, with both recording systems (cs2-server-plugin/AGENTS.md,
+# "Overlays"), so every take switches off the two that show without anybody asking for them:
+#
+# * ``csdm_voice_indicator`` ("who is talking": microphones and nicknames, left of the screen) is on by default
+#   and follows the voice data of the demo, whether the voices are heard or not (``tv_listen_voice_indices 0``
+#   does not hide it). Any demo recorded with voice chat had the panel in its video.
+# * ``csdm_buttons_overlay`` (the keys pressed by the spectated player) is off by default, but the plugin keeps
+#   both in ``game/csgo/cfg/csdm_settings.json``: on a machine where CS Demo Manager is used with it on, it would
+#   be in every take, since a take always spectates a player.
+#
+# What a video shows must come from the request, not from that file. Builds of the plugin older than its
+# in-game UI (cs-demo-manager d7cca06) have neither the panels nor these convars: the commands are then unknown
+# to the game's console, which is not expected to matter (not tried with such a build).
+PLUGIN_PANEL_COMMANDS: tuple[str, ...] = (
+    "csdm_buttons_overlay 0",
+    "csdm_voice_indicator 0",
 )
 
 SlotLookup = Callable[[str, int], "int | None"]
@@ -106,7 +126,8 @@ class ActionOptions:
     player_voices: bool = False  # CSDM default is True; voice comms are private, so opt-in here
     true_view: bool = False  # cl_demo_predict, CSDM default
     close_game: bool = True
-    extra_commands: tuple[str, ...] = ()  # run at each sequence's setup tick (CSDM's per-sequence "cfg")
+    # run last at each sequence's setup tick (CSDM's per-sequence "cfg"), so they win over what is set before
+    extra_commands: tuple[str, ...] = ()
     recording_system: str = "startmovie"  # "startmovie" (the game's own recorder) or "hlae"
     frame_format: str = "tga"  # "tga" (lossless, huge) or "jpg" (~10x smaller, slightly lossy)
     # HLAE only: folder the takes are written to (forward slashes) and the ffmpeg output options of its encoder.
@@ -298,6 +319,10 @@ def sequence_actions(sequence: RecordSequence, options: ActionOptions, *, is_las
     add(setup_tick, f"spec_show_xray {1 if options.show_xray else 0}")
     add(setup_tick, f"mp_display_kill_assists {1 if options.show_assists else 0}")
     add(setup_tick, fps_cmd)
+    # On the setup tick, where the one real recording that checked `csdm_voice_indicator 0` had it, and ahead
+    # of the caller's commands: `ingame_commands` runs last and can bring a panel back.
+    for cmd in PLUGIN_PANEL_COMMANDS:
+        add(setup_tick, cmd)
     for cmd in options.extra_commands:
         if cmd.strip():
             add(setup_tick, cmd.strip())

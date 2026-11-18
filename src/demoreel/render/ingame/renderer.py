@@ -379,7 +379,8 @@ class IngameRenderer:
                             kill_names=procs.CS2_PROCESS_NAMES)
                     except _GameDidNotQuit as exc:
                         warnings.append(str(exc))
-                    # gameinfo.gi is restored and the plugin removed when this block ends: let the game go first.
+                    # gameinfo.gi and the plugin's settings file are restored and the plugin removed when this
+                    # block ends: let the game go first (the plugin writes its settings once more on shutdown).
                     wait_until_gone(self._is_cs2_running)
                 if run is not None and run.returncode != 0 and run.duration_s < 2.0:
                     raise RenderError(f"CS2 failed to start (exit code {run.returncode}). {run.output_tail[-600:]}")

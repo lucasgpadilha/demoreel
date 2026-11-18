@@ -12,7 +12,8 @@ Ported from CS Demo Manager (MIT, https://github.com/akiver/cs-demo-manager):
 demoreel never ships or downloads the binary: the user copies it from CSDM's ``static/cs2/`` folder into
 :attr:`IngameSettings.plugin_dir`. What this module adds on top of the reference is safety around
 ``gameinfo.gi``: the original is saved next to it as ``gameinfo.gi.demoreel-backup`` before patching, always
-restored when the session ends, and recovered at the next start if the process died in between.
+restored when the session ends, and recovered at the next start if the process died in between. The plugin's
+settings file (``game/csgo/cfg/csdm_settings.json``) gets the same treatment, because a recording changes it.
 
 Which binary for which CS2 build (``src/common/types/cs2-plugin-version.ts``): ``server.dll`` / ``libserver.so``
 is the *latest* build; ``server_<N>.dll`` / ``libserver_<N>.so`` are frozen builds that work with CS2 up to patch
@@ -306,6 +307,75 @@ def patched_gameinfo(gameinfo: Path) -> Iterator[bool]:
         _restore_gameinfo(gameinfo, original)
 
 
+# --- the plugin's own settings file -------------------------------------------------------------------------
+
+# cs2-server-plugin/settings.cpp: the plugin keeps the state of its panels in `<game>/csgo/cfg/csdm_settings.json`,
+# reads it when it loads and writes it back when a setting changes (checked every 128 frames, and on shutdown).
+# The file belongs to whoever uses CS Demo Manager on this machine. Every recording changes settings (see
+# ``actions.PLUGIN_PANEL_COMMANDS``), so without care it would switch their voice indicator off for good, or
+# leave a file behind in an install that never had one.
+PLUGIN_SETTINGS_NAME = "csdm_settings.json"
+
+
+def plugin_settings_path(settings: IngameSettings) -> Path:
+    return settings.csgo_dir / "cfg" / PLUGIN_SETTINGS_NAME
+
+
+def recover_plugin_settings(path: Path) -> str:
+    """Put back the plugin settings saved by a run that died before restoring them. Returns ``"none"`` or
+    ``"restored"``.
+
+    The backup holds the file as it was before the recording; an empty backup means there was no file, and what
+    the plugin wrote is deleted. Unlike ``gameinfo.gi`` nothing in the file tells who wrote it last, so settings
+    changed in CS Demo Manager between that crash and this call are lost to the older copy.
+    """
+    backup = backup_path(path)
+    if not backup.is_file():
+        return "none"
+    saved = backup.read_bytes()
+    if saved:
+        _write_bytes(path, saved)
+    else:
+        path.unlink(missing_ok=True)
+    backup.unlink(missing_ok=True)
+    return "restored"
+
+
+def _restore_plugin_settings(path: Path, original: bytes | None) -> None:
+    backup = backup_path(path)
+    try:
+        if original is None:
+            path.unlink(missing_ok=True)
+        elif not path.is_file() or path.read_bytes() != original:
+            _write_bytes(path, original)
+        backup.unlink(missing_ok=True)
+    except OSError as exc:
+        raise RenderError(
+            f"Could not restore {path} (the panel settings of CS Demo Manager's plugin): {exc}. The original is "
+            f"saved as {backup} and will be put back automatically the next time the in-game renderer starts."
+        ) from exc
+
+
+@contextmanager
+def preserved_plugin_settings(path: Path) -> Iterator[None]:
+    """Leave the plugin's settings file exactly as found - same bytes, or still absent - once the block ends,
+    whatever the plugin wrote to it meanwhile. The game must be gone by then: the plugin saves on shutdown."""
+    original: bytes | None = None
+    try:
+        recover_plugin_settings(path)
+        if path.is_file():
+            original = path.read_bytes()
+        if path.parent.is_dir():  # no cfg folder: nothing to save, and nowhere for the plugin to write
+            _write_bytes(backup_path(path), original or b"")
+    except OSError as exc:
+        raise RenderError(f"Cannot save a copy of {path} before recording: {exc}. "
+                          f"Is the CS2 folder writable?") from exc
+    try:
+        yield
+    finally:
+        _restore_plugin_settings(path, original)
+
+
 # --- installation -------------------------------------------------------------------------------------------
 
 
@@ -443,10 +513,12 @@ def uninstall_plugin(settings: IngameSettings) -> None:
 @contextmanager
 def plugin_session(settings: IngameSettings, binary: PluginBinary,
                    base_env: Mapping[str, str] | None = None) -> Iterator[InstalledPlugin]:
-    """Plugin installed + ``gameinfo.gi`` patched inside the block, both undone afterwards no matter what."""
+    """Plugin installed + ``gameinfo.gi`` patched inside the block, both undone afterwards no matter what, and
+    the plugin's settings file put back as it was."""
     installed = install_plugin(settings, binary, base_env)
     try:
-        with patched_gameinfo(settings.gameinfo_path) as patched:
+        with (preserved_plugin_settings(plugin_settings_path(settings)),
+              patched_gameinfo(settings.gameinfo_path) as patched):
             installed.gameinfo_patched = patched
             yield installed
     finally:
