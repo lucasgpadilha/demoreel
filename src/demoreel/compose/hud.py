@@ -109,7 +109,9 @@ class Hud:
         self.f_caption = self._font("Barlow-SemiBold.ttf", 25 * s)
         self.f_big = self._font("BarlowCondensed-ExtraBold.ttf", 66 * s)
         self.p = skia.Paint(AntiAlias=True)
-        self.type = shared_type(brand.fonts.display, brand.fonts.body)  # glyph fallback: chat is typed by players
+        self.type = shared_type(brand.fonts.display, brand.fonts.body)  # glyph fallback: names, and what players type
+        self._split: dict[tuple[str, int], tuple[tuple[tuple[str, skia.Font, float], ...], float]] = {}
+        self._fits: dict[tuple[str, int, float], str] = {}
 
     @staticmethod
     def _font(name: str, size: float) -> skia.Font:
@@ -131,26 +133,55 @@ class Hud:
         self.p.setColor(color)
         cv.drawPath(path, self.p)
 
+    def _runs(self, text: str, font: skia.Font) -> tuple[tuple[tuple[str, skia.Font, float], ...], float]:
+        """``text`` in ``font`` as (string, font, width) runs and their total width. Names of players and teams
+        are full of symbols the brand's font does not have ("⑯ ✓ ☆ nick"): those go to a system font instead
+        of coming out as empty boxes. A text the font covers is one run in it, exactly as before."""
+        key = (text, id(font))  # the fonts live as long as the HUD does
+        hit = self._split.get(key)
+        if hit is None:
+            if len(self._split) > 2000:
+                self._split.clear()
+            hit = self._split[key] = self.type.split(text, font)
+        return hit
+
+    def _width(self, text: str, font: skia.Font) -> float:
+        """The width `_text` draws ``text`` with."""
+        return self._runs(text, font)[1]
+
     def _text(self, cv: skia.Canvas, text: str, x: float, y: float, font: skia.Font, color: int, *,
               align: str = "left", shadow: bool = True) -> float:
-        w = font.measureText(text)
+        runs, w = self._runs(text, font)
         if align == "center":
             x -= w / 2
         elif align == "right":
             x -= w
         if shadow:
             self.p.setColor(skia.ColorSetARGB(int(150 * (skia.ColorGetA(color) / 255)), 0, 0, 0))
-            cv.drawString(text, x + 1.5 * self.s, y + 2 * self.s, font, self.p)
+            sx = x
+            for t, f, rw in runs:
+                cv.drawString(t, sx + 1.5 * self.s, y + 2 * self.s, f, self.p)
+                sx += rw
         self.p.setColor(color)
-        cv.drawString(text, x, y, font, self.p)
+        for t, f, rw in runs:
+            cv.drawString(t, x, y, f, self.p)
+            x += rw
         return w
 
     def _fit(self, text: str, font: skia.Font, max_width: float) -> str:
-        if font.measureText(text) <= max_width:
-            return text
-        while len(text) > 1 and font.measureText(text + "…") > max_width:
-            text = text[:-1]
-        return text.rstrip() + "…"
+        """``text`` shortened with an ellipsis until `_text` draws it within ``max_width``."""
+        key = (text, id(font), round(max_width, 1))
+        hit = self._fits.get(key)
+        if hit is None:
+            hit = text
+            if self._width(hit, font) > max_width:
+                while len(hit) > 1 and self.type.split(hit + "…", font)[1] > max_width:
+                    hit = hit[:-1]
+                hit = hit.rstrip() + "…"
+            if len(self._fits) > 2000:
+                self._fits.clear()
+            self._fits[key] = hit
+        return hit
 
     # ------------------------------------------------------------------ elements
     def _corner(self, cv: skia.Canvas, st: HudState) -> None:
@@ -172,7 +203,7 @@ class Hud:
             # The same moment again: the score, the round and the bomb clock of the play would be noise (and the
             # clock would run backwards), so the corner only says what this is.
             bh = mh * 0.74
-            bw = self.f_label.measureText(c.replay_text) + 30 * s
+            bw = self._width(c.replay_text, self.f_label) + 30 * s
             self._slab(cv, x, y + mh * 0.13, bw, bh, _col(self.accent, 0.96 * fade))
             self._text(cv, c.replay_text, x + 15 * s + bh * SLANT * 0.5, y + mh * 0.13 + bh * 0.76, self.f_label,
                        _col(self.c.background, fade), shadow=False)
@@ -189,7 +220,7 @@ class Hud:
                 x += self._text(cv, self._fit(c.team_right, self.f_small, 150 * s), x, base, self.f_small,
                                 _col(self.c.text, 0.9 * fade)) + 16 * s
         if c.round_text:
-            rw = self.f_small.measureText(c.round_text) + 22 * s
+            rw = self._width(c.round_text, self.f_small) + 22 * s
             self._slab(cv, x, y + mh * 0.24, rw, mh * 0.62, _col(self.accent, 0.95 * fade))
             self._text(cv, c.round_text, x + 11 * s + mh * 0.62 * SLANT * 0.5, base - 1 * s, self.f_small,
                        _col(self.c.background, fade), shadow=False)
@@ -203,7 +234,7 @@ class Hud:
                 left = max(0.0, c.bomb_seconds - (st.tick - c.plant_tick) / st.tickrate)
                 text = f"{c.bomb_text} 0:{int(left + 0.999):02d}"
         if text:
-            bw = self.f_small.measureText(text) + 22 * s
+            bw = self._width(text, self.f_small) + 22 * s
             self._slab(cv, x, y + mh * 0.24, bw, mh * 0.62, _col(colour, 0.95 * fade))
             self._text(cv, text, x + 11 * s + mh * 0.62 * SLANT * 0.5, base - 1 * s, self.f_small,
                        _col("#ffffff", fade), shadow=False)
@@ -216,7 +247,7 @@ class Hud:
             return
         x0, y0 = 34 * s, self.h - 176 * s
         name, label, detail, width = self._nameplate_box(c)
-        label_w = self.f_label.measureText(label) + 26 * s if label else 0
+        label_w = self._width(label, self.f_label) + 26 * s if label else 0
         dx = -(width + 80 * s) * (1 - slide)
         cv.save()
         cv.clipRect(skia.Rect.MakeXYWH(0, y0 - 16 * s, self.w * 0.7, 140 * s))
@@ -248,9 +279,9 @@ class Hud:
         s = self.s
         name = self._fit(c.player, self.f_name, self.w * 0.42)
         label, _, detail = c.context.partition(" · ") if c.context else (c.label, "", c.detail)
-        label_w = self.f_label.measureText(label) + 26 * s if label else 0
-        detail_w = self.f_small.measureText(detail) if detail else 0
-        return name, label, detail, max(self.f_name.measureText(name) + 44 * s, label_w + detail_w + 44 * s)
+        label_w = self._width(label, self.f_label) + 26 * s if label else 0
+        detail_w = self._width(detail, self.f_small) if detail else 0
+        return name, label, detail, max(self._width(name, self.f_name) + 44 * s, label_w + detail_w + 44 * s)
 
     def _kill_counter(self, cv: skia.Canvas, st: HudState) -> None:
         total = len(st.clip.kill_ticks)
@@ -311,7 +342,7 @@ class Hud:
         number and the play's label, so in a clip that has those the caption sits one lane higher."""
         s = self.s
         text = self._fit(st.caption or "", self.f_caption, self.w * 0.7)
-        tw = self.f_caption.measureText(text)
+        tw = self._width(text, self.f_caption)
         busy = not st.replay and (len(st.clip.kill_ticks) >= 2 or bool(st.clip.label))
         return text, self.w / 2 - tw / 2 - 26 * s, self.h - (176 if busy else 128) * s, tw + 44 * s
 
