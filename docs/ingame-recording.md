@@ -153,6 +153,18 @@ Files demoreel touches inside the CS2 folder, all removed/restored afterwards: `
 - **One instance at a time.** A lock file (`<data_dir>/ingame/recording.lock`) serializes recordings; a second
   job waits (30 min by default). If CS2 is already open - your own game - the render is refused: demoreel never
   kills a game it did not start.
+- **Machines that host game servers.** A dedicated server (`cs2 -dedicated`) is a process with the same name
+  as the game. demoreel tells them apart by the command line: servers do not count as "CS2 is already
+  running", and when a recording is cancelled or times out only the game it started is closed - never a
+  server. Two things to know:
+  - a `cs2` process started by another user or as administrator cannot be inspected; it is taken for the game
+    (recording is refused) and is never killed. Run demoreel as the user that runs the servers;
+  - a server running **from the same CS2 folder** the game is recorded from blocks recording: for a moment
+    that folder's `gameinfo.gi` is changed and a plugin is added, which a server starting meanwhile would load,
+    and the game would load the server's add-ons (Metamod, CounterStrikeSharp). Record from a second copy of
+    CS2 (another Steam library, `DEMOREEL_CS2_DIR`) or stop the server while recording.
+  Recording next to running servers still shares the machine's CPU and GPU with them: measure before doing it
+  during a match.
 - **Do not touch the game while it records.** It runs windowed (`-sw`); keep the window un-minimized and fully
   on screen, and do not click or type in it (input may change the spectated player). A resolution
   larger than the desktop cannot be recorded correctly: frames are scaled/padded to the requested size.

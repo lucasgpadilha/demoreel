@@ -231,7 +231,8 @@ def assert_can_start(is_cs2_running: Callable[[], bool | None] = procs.is_cs2_ru
                      is_steam_running: Callable[[], bool | None] = procs.is_steam_running) -> None:
     if is_cs2_running():
         raise RenderError("CS2 is already running. Close the game before recording (demoreel never kills a "
-                          "game it did not start).")
+                          "game it did not start). Dedicated servers do not count; a cs2 process started by "
+                          "another user or as administrator cannot be told apart and is taken for the game.")
     if is_steam_running() is False:
         raise RenderError("Steam is not running. Start Steam and log in, then try again.")
 
