@@ -144,6 +144,85 @@ def test_crash_recovery_with_a_corrupt_backup_removes_only_our_line(tmp_path):
     assert gameinfo.read_bytes() == GAMEINFO.encode()
 
 
+# --- the plugin's settings file ---------------------------------------------------------------------------
+
+# What the plugin writes (settings.cpp, `dump(2)`), shortened. The owner of this one likes the voice indicator.
+PLUGIN_SETTINGS = b'{\n  "csdm_buttons_overlay": true,\n  "csdm_voice_indicator": true\n}'
+RECORDED_SETTINGS = b'{\n  "csdm_buttons_overlay": false,\n  "csdm_voice_indicator": false\n}'
+
+
+def settings_file(tmp_path: Path) -> Path:
+    path = plugin.plugin_settings_path(make_settings(tmp_path))
+    path.parent.mkdir()
+    return path
+
+
+def test_plugin_settings_live_in_the_cfg_folder_of_the_game(tmp_path):
+    settings = make_settings(tmp_path)
+    assert plugin.plugin_settings_path(settings) == settings.cs2_dir / "game" / "csgo" / "cfg" / "csdm_settings.json"
+
+
+def test_settings_changed_by_the_plugin_while_recording_are_put_back_byte_for_byte(tmp_path):
+    path = settings_file(tmp_path)
+    path.write_bytes(PLUGIN_SETTINGS)
+    with plugin.preserved_plugin_settings(path):
+        assert plugin.backup_path(path).read_bytes() == PLUGIN_SETTINGS  # on disk before the game can write
+        path.write_bytes(RECORDED_SETTINGS)  # the plugin saving `csdm_voice_indicator 0`
+    assert path.read_bytes() == PLUGIN_SETTINGS
+    assert sorted(p.name for p in path.parent.iterdir()) == ["csdm_settings.json"]  # no backup, no temp file
+
+
+def test_a_settings_file_the_plugin_created_while_recording_is_removed(tmp_path):
+    path = settings_file(tmp_path)  # CS Demo Manager was never used with this install
+    with plugin.preserved_plugin_settings(path):
+        path.write_bytes(RECORDED_SETTINGS)
+    assert list(path.parent.iterdir()) == []
+
+
+def test_settings_are_put_back_when_the_body_raises_and_untouched_ones_are_not_rewritten(tmp_path):
+    path = settings_file(tmp_path)
+    path.write_bytes(PLUGIN_SETTINGS)
+    with pytest.raises(KeyboardInterrupt):
+        with plugin.preserved_plugin_settings(path):
+            path.write_bytes(RECORDED_SETTINGS)
+            raise KeyboardInterrupt
+    assert path.read_bytes() == PLUGIN_SETTINGS and not plugin.backup_path(path).exists()
+
+    before = path.stat().st_mtime_ns
+    with plugin.preserved_plugin_settings(path):
+        pass  # the plugin had nothing to save
+    assert path.stat().st_mtime_ns == before
+
+
+def test_an_install_without_a_cfg_folder_is_left_alone(tmp_path):
+    path = plugin.plugin_settings_path(make_settings(tmp_path))
+    with plugin.preserved_plugin_settings(path):
+        assert not path.parent.exists()
+    assert not path.parent.exists()
+
+
+def test_crash_recovery_puts_the_saved_settings_back_or_removes_what_the_plugin_created(tmp_path):
+    path = settings_file(tmp_path)
+    assert plugin.recover_plugin_settings(path) == "none"
+    # killed while recording, the file had been there...
+    plugin.backup_path(path).write_bytes(PLUGIN_SETTINGS)
+    path.write_bytes(RECORDED_SETTINGS)
+    assert plugin.recover_plugin_settings(path) == "restored"
+    assert path.read_bytes() == PLUGIN_SETTINGS and not plugin.backup_path(path).exists()
+    # ...or it had not (an empty backup says so)
+    path.unlink()
+    plugin.backup_path(path).write_bytes(b"")
+    path.write_bytes(RECORDED_SETTINGS)
+    assert plugin.recover_plugin_settings(path) == "restored"
+    assert list(path.parent.iterdir()) == []
+    # and the next session does it by itself, before saving its own copy
+    plugin.backup_path(path).write_bytes(PLUGIN_SETTINGS)
+    path.write_bytes(RECORDED_SETTINGS)
+    with plugin.preserved_plugin_settings(path):
+        assert path.read_bytes() == PLUGIN_SETTINGS
+    assert path.read_bytes() == PLUGIN_SETTINGS
+
+
 # --- which binary -----------------------------------------------------------------------------------------
 
 
@@ -243,6 +322,23 @@ def test_plugin_session_cleans_up_when_the_body_raises(tmp_path):
     assert settings.gameinfo_path.read_bytes() == original
     assert not settings.plugin_install_dir.exists()
     assert not plugin.backup_path(settings.gameinfo_path).exists()
+
+
+def test_plugin_session_puts_the_plugin_settings_back_after_gameinfo(tmp_path):
+    settings = make_settings(tmp_path)
+    (settings.plugin_dir / "server.dll").write_bytes(b"placeholder")
+    binary = plugin.select_plugin_binary(settings.plugin_dir, "win32", None)
+    path = plugin.plugin_settings_path(settings)
+    path.parent.mkdir()
+    path.write_bytes(PLUGIN_SETTINGS)
+    with pytest.raises(RuntimeError):
+        with plugin.plugin_session(settings, binary):
+            assert plugin.backup_path(path).read_bytes() == PLUGIN_SETTINGS
+            path.write_bytes(RECORDED_SETTINGS)
+            raise RuntimeError("game crashed")
+    assert path.read_bytes() == PLUGIN_SETTINGS
+    assert sorted(p.name for p in path.parent.iterdir()) == ["csdm_settings.json"]
+    assert settings.gameinfo_path.read_bytes() == GAMEINFO.encode()
 
 
 def test_linux_layout_installs_the_vulkan_layer_and_its_environment(tmp_path):

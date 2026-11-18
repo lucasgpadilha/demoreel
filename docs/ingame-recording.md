@@ -82,7 +82,7 @@ Passed in the render request's `options.extra` (all optional):
 | `ingame_assists` | show assists in the kill feed | `true` |
 | `ingame_player_voices` | include the players' voice chat recorded in the demo | `false` |
 | `ingame_true_view` | `cl_demo_predict 1` ("TrueView") | `false` |
-| `ingame_commands` | console commands run before each take (list, or one string separated by `;`) | none |
+| `ingame_commands` | console commands run before each take, after demoreel's own (list, or one string separated by `;`) | none |
 | `ingame_launch_args` | extra CS2 launch options (`-insecure` cannot be removed) | none |
 | `ingame_keep_raw` | keep the TGA/WAV files in the game folder (debugging) | `false` |
 | `ingame_swap_red_blue` | swap red and blue while encoding | Linux without the Vulkan layer |
@@ -108,7 +108,8 @@ Everything below is a port of CS Demo Manager (file names refer to its repositor
    - tick 96: HUD/cvar setup (`sv_cheats 1`, `volume 1`, telemetry and build info off, `cl_demo_predict`,
      `cl_draw_only_deathnotices`, `tv_listen_voice_indices`), then `demo_gototick <setup tick - 1>`;
    - setup tick (= start - one second of ticks): `spec_show_xray`, `mp_display_kill_assists`,
-     `host_framerate <fps>`, your `ingame_commands`;
+     `host_framerate <fps>`, the plugin's own panels off (`csdm_buttons_overlay 0`, `csdm_voice_indicator 0`,
+     not in the reference: see [Known pitfalls](#known-pitfalls)), then your `ingame_commands`;
    - start - 4: `pause_playback` (the plugin pauses 2 s so the loading tint is not recorded);
    - start: `spec_mode 1`, `spec_player <slot>`, `startmovie <n>-sequence`;
    - end: `endmovie`; end + 64: `go_to_next_sequence` (the plugin restarts the demo from tick 0 for the next
@@ -130,6 +131,10 @@ Everything below is a port of CS Demo Manager (file names refer to its repositor
    `gameinfo.gi` is saved as `gameinfo.gi.demoreel-backup` first and restored when the game exits, whatever
    happened. If demoreel itself is killed in between, the next run restores it before doing anything else
    (or simply deletes the backup when the file is already clean, e.g. after a Steam update).
+   The plugin keeps the state of its panels in `game/csgo/cfg/csdm_settings.json` and writes it back whenever a
+   setting changes, which hiding the panels does. That file is CS Demo Manager's, so it is saved
+   (`csdm_settings.json.demoreel-backup`) before the game starts and put back once it has quit: the same bytes,
+   or no file when there was none. A run that was killed is undone by the next one, as for `gameinfo.gi`.
 4. **Launch.** `cs2.exe -insecure -novid +playdemo <demo> -width W -height H -sw` (Linux: the same through
    `SteamLinuxRuntime_sniper/_v2-entry-point --verb=waitforexitandrun -- game/cs2.sh`), with `USRLOCALCSGO`
    pointing to `<data_dir>/ingame/cfg` so your own CS2 video settings and binds are not touched
@@ -141,7 +146,8 @@ Everything below is a port of CS Demo Manager (file names refer to its repositor
    written and the raw files are deleted.
 
 Files demoreel touches inside the CS2 folder, all removed/restored afterwards: `game/csgo/gameinfo.gi`
-(+ `.demoreel-backup`), `game/csgo/csdm/`, `game/csgo/movie/<timestamp>/<n>-sequence.wav`,
+(+ `.demoreel-backup`), `game/csgo/cfg/csdm_settings.json` (written by the plugin; + `.demoreel-backup`),
+`game/csgo/csdm/`, `game/csgo/movie/<timestamp>/<n>-sequence.wav`,
 `game/bin/<platform>/csdm.log` (the plugin's log, deleted before each run and quoted in error messages).
 
 ## Known pitfalls
@@ -168,22 +174,33 @@ Files demoreel touches inside the CS2 folder, all removed/restored afterwards: `
 - **Do not touch the game while it records.** It runs windowed (`-sw`); keep the window un-minimized and fully
   on screen, and do not click or type in it (input may change the spectated player). A resolution
   larger than the desktop cannot be recorded correctly: frames are scaled/padded to the requested size.
-- **Plugin panels can end up in the video.** Recent plugin builds draw CSDM's in-game panels into recorded
-  frames when they are visible. The playback panel is hidden by default, but panels you enabled while using
-  CS Demo Manager (their state is kept in `game/csgo/cfg/csdm_settings.json`) and the voice indicator (when
-  `ingame_player_voices` is on) may show up. Turn them off with `ingame_commands`, e.g.
-  `["csdm_buttons_overlay 0", "csdm_voice_indicator 0"]` (not verified).
+- **Plugin panels are kept out of the video.** Recent plugin builds draw CSDM's in-game panels into recorded
+  frames when they are visible, with both recording backends. Two of them show without anybody asking: the
+  voice indicator ("who is talking": microphones and nicknames on the left), which is on by default and
+  follows the voice data of the demo **whether or not `ingame_player_voices` is on**, and the buttons overlay
+  (keys pressed by the spectated player) when the machine's owner turned it on in CS Demo Manager (the plugin
+  remembers both in `game/csgo/cfg/csdm_settings.json`). Every take therefore runs `csdm_buttons_overlay 0` and
+  `csdm_voice_indicator 0`. To have one in the picture, ask for it: `ingame_commands` runs afterwards, so
+  `["csdm_voice_indicator 1"]` brings the indicator back. The playback panel is hidden by default and
+  nothing is sent for it. Footage captured before this was the default keeps the panel
+  it was recorded with. Hiding the voice indicator this way was checked in a real recording; the buttons
+  overlay command and the built-in default were not (see [What is not verified](#what-is-not-verified)).
 - **Disk usage** is temporary but large (see Requirements); the job fails early when the CS2 drive lacks space.
 - **Steam must be running** and logged in; in offline mode the plugin starts the demo itself after ~8 s.
 - **CS Demo Manager on the same machine**: do not use its playback/recording while demoreel records. If its
   search path is already in `gameinfo.gi`, demoreel leaves the file exactly as it found it. The plugin is pointed
-  at an unused WebSocket port so an open CSDM app cannot drive the recording.
+  at an unused WebSocket port so an open CSDM app cannot drive the recording. Your panel settings
+  (`game/csgo/cfg/csdm_settings.json`) are put back after each recording, so the voice indicator and the
+  buttons overlay are as you left them the next time you watch a demo from CS Demo Manager.
 - **Camera**: `pov_steamid = null` segments are not given a camera; the game shows its default spectator view.
   If the POV player is dead at the clip start the game may pick another camera.
 - **Antivirus / permissions**: the CS2 folder must be writable by the user running demoreel.
 - **Crash leftovers**: `gameinfo.gi` is restored automatically on the next run. To do it by hand, copy
   `gameinfo.gi.demoreel-backup` over `gameinfo.gi` and delete `game/csgo/csdm/`, or verify the game files in
-  Steam.
+  Steam. The plugin's settings come back the same way: by hand, copy
+  `game/csgo/cfg/csdm_settings.json.demoreel-backup` over `csdm_settings.json` (an empty backup means there was
+  no file: delete both). Settings changed in CS Demo Manager between the crash and the next recording are
+  replaced by that older copy.
 
 ## Linux notes
 
@@ -232,6 +249,11 @@ Later runs (2026-11-15, same machine) validated the two-stage pipeline through t
 - after five recording sessions in total, `gameinfo.gi` and the user's configuration are still byte-identical
   and nothing is left in the game folder.
 
+A recording on 2026-11-18 (CS2 patch 14198) of a demo from another platform, which carries the players' voice
+chat, had the plugin's voice indicator in the picture for half of the clip although `ingame_player_voices` was
+off; the same recording with `csdm_voice_indicator 0` passed through `ingame_commands` did not. That is the
+command, on the tick, that every take now runs by itself.
+
 The first run also found one defect, now fixed and covered by a test: CS2 writes `ServerConfig.vdf` and
 `_iconcache/` into `game/csgo/csdm` while it is the first search path, which left that folder and
 `game/bin/win64/csdm.log` behind. Both are now removed after a successful recording.
@@ -248,6 +270,12 @@ The first run also found one defect, now fixed and covered by a test: CS2 writes
 - Other resolutions / frame rates than 1280x720 at 30 fps; player-POV (non-SourceTV) demos.
 - The recording uses the game's default settings (private config folder), not the machine owner's: default
   crosshair, viewmodel and video quality. Choosing those per render is not implemented yet.
+- The plugin panels, beyond the one run above: `csdm_voice_indicator 0` sent by the recorder itself rather than
+  through `ingame_commands` (same command and tick, covered by tests with a fake game only), on each recording
+  backend, and `csdm_buttons_overlay 0` at all; a frozen plugin build from before the panels existed, where both commands
+  are unknown to the game; and `csdm_settings.json` being put back after a real session (the plugin's source
+  says it writes the file within 128 frames of a change and on shutdown; the restore runs once the game is
+  gone).
 
 ## Manual test procedure
 
@@ -262,8 +290,10 @@ The first run also found one defect, now fixed and covered by a test: CS2 writes
    CS2 opens in a window, loads the demo, jumps to the highlight, records and quits by itself. Do not interact
    with it.
 4. Check: the mp4 plays with sound, shows the right player's first-person view from its first frame and has no
-   loading tint at the start; `game/csgo/gameinfo.gi` contains no `csgo/csdm` line and
-   `gameinfo.gi.demoreel-backup` and `game/csgo/csdm/` are gone; CS2 starts normally from Steam afterwards.
+   loading tint at the start, and no plugin panel (with a demo that has voice chat: no microphones and
+   nicknames on the left); `game/csgo/gameinfo.gi` contains no `csgo/csdm` line and
+   `gameinfo.gi.demoreel-backup` and `game/csgo/csdm/` are gone; `game/csgo/cfg/csdm_settings.json` is the same
+   as before (or still absent) with no `.demoreel-backup` next to it; CS2 starts normally from Steam afterwards.
 5. Then try `--top 3` (several takes: the demo restarts between them) and a cancel in the middle (Ctrl+C or
    cancelling the job): the game must close and `gameinfo.gi` must be clean.
 6. If it fails, the error message quotes the end of `game/bin/win64/csdm.log` (`linuxsteamrt64` on Linux).

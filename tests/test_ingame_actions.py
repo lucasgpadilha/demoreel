@@ -39,6 +39,8 @@ def test_single_sequence_matches_the_csdm_command_order_and_tick_offsets():
         (9936, "spec_show_xray 0"),  # setup tick = start - round(tickrate)
         (9936, "mp_display_kill_assists 1"),
         (9936, "host_framerate 30"),
+        (9936, "csdm_buttons_overlay 0"),  # demoreel addition: the plugin's panels stay out of the video
+        (9936, "csdm_voice_indicator 0"),
         (9996, "pause_playback"),  # start - 4
         (96, "demo_gototick 9935"),  # one tick before the setup tick
         (9992, "spec_mode 1"),  # demoreel addition: camera aimed 8 ticks early, before the pause
@@ -79,6 +81,38 @@ def test_options_change_only_the_expected_commands():
     assert (4000, "startmovie 2-sequence") in got
     assert got[-1] == (4264, "go_to_next_sequence")
     assert not any(c.startswith(("spec_player", "spec_mode", "mirv_")) for _, c in got)  # no POV, no HLAE
+
+
+def test_the_plugin_panels_are_switched_off_in_every_take_whatever_was_asked():
+    # Regression: a demo with voice chat was recorded with the plugin's "who is talking" panel (microphones and
+    # nicknames) on the left of the picture, although the voices were off. The panel follows the voice data of
+    # the demo, not `tv_listen_voice_indices`, and it is on unless told otherwise.
+    seqs = [RecordSequence(1, 20000, 20500, cameras=(CameraCut(20000, 6),)), RecordSequence(2, 8000, 8400),
+            RecordSequence(3, 160, 400)]  # the last one has its setup on the first tick anything runs at
+    for options in (ActionOptions(),
+                    ActionOptions(player_voices=True, only_death_notices=False, frame_format="jpg"),
+                    ActionOptions(recording_system="hlae", hlae_output_dir="C:/tmp/hlae")):
+        groups = actions.build_actions(seqs, options)
+        assert len(groups) == 3
+        for group in groups:
+            got = [a.cmd for a in group]
+            record = next(i for i, c in enumerate(got)
+                          if c.startswith("startmovie") or c == "mirv_streams record start")
+            for panel in ("csdm_voice_indicator 0", "csdm_buttons_overlay 0"):
+                assert got.count(panel) == 1, (options.recording_system, panel)
+                assert got.index(panel) < record
+                (tick,) = [a.tick for a in group if a.cmd == panel]
+                assert tick < next(a.tick for a in group if a.cmd == got[record])  # off before the first frame
+            assert not any(c in {"csdm_voice_indicator 1", "csdm_buttons_overlay 1"} for c in got)
+
+
+def test_the_callers_commands_run_after_the_panel_commands_so_a_panel_can_be_asked_for():
+    seq = RecordSequence(number=1, start_tick=4000, end_tick=4200)
+    opts = ActionOptions(player_voices=True, extra_commands=("csdm_voice_indicator 1",))
+    got = cmds(actions.sequence_actions(seq, opts, is_last=True))
+    # same tick: the plugin runs them in file order, the last one wins
+    assert got.index((3936, "csdm_voice_indicator 0")) < got.index((3936, "csdm_voice_indicator 1"))
+    assert (3936, "csdm_buttons_overlay 0") in got
 
 
 def test_multi_segment_clips_are_numbered_in_video_order_and_recorded_by_start_tick():

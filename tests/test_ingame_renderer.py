@@ -208,6 +208,45 @@ def test_render_records_encodes_and_leaves_the_game_folder_as_it_found_it(env):
     assert not launcher.RecordingLock(settings.lock_path).is_held_elsewhere()
 
 
+def test_render_hides_the_plugin_panels_and_leaves_the_plugin_settings_as_it_found_them(env):
+    """A demo with voice chat came out with the plugin's "who is talking" panel in the picture. Hiding it makes
+    the plugin save that in its settings file, which belongs to whoever uses CS Demo Manager on the machine."""
+    settings, demo, tmp_path = env
+    add_plugin(settings)
+    path = plugin.plugin_settings_path(settings)
+    path.parent.mkdir()
+    theirs = b'{\n  "csdm_buttons_overlay": true,\n  "csdm_voice_indicator": true\n}'
+    seen: list[bytes] = []
+
+    class GameWithPlugin(FakeGame):
+        def __call__(self, command, **kwargs):
+            seen.append(plugin.backup_path(path).read_bytes())
+            run = super().__call__(command, **kwargs)
+            commands = [a["cmd"] for s in self.calls[-1]["sequences"] for a in s["actions"]]
+            state = {name: f"{name} 0" not in commands for name in ("csdm_buttons_overlay", "csdm_voice_indicator")}
+            path.write_text(json.dumps(state, indent=2))  # what the plugin does when a setting changed
+            return run
+
+    clips = [Clip(segments=[ClipSegment(8000, 8032, STEAM_A)]), Clip(segments=[ClipSegment(9000, 9032, STEAM_B)])]
+    for before in (theirs, None):  # a CS Demo Manager user's file, then an install that has none
+        if before is None:
+            path.unlink()
+        else:
+            path.write_bytes(before)
+        game = GameWithPlugin(settings)
+        job = make_job(demo, tmp_path, clips)
+        job.options.extra["ingame_player_voices"] = before is None  # hidden with the voices on as well
+        renderer_for(settings, game).render(job)
+
+        for sequence in game.calls[0]["sequences"]:  # every take, without anybody asking
+            commands = [a["cmd"] for a in sequence["actions"]]
+            assert "csdm_voice_indicator 0" in commands and "csdm_buttons_overlay 0" in commands
+        assert seen.pop() == (before or b"")
+        assert (path.read_bytes() if path.exists() else None) == before
+        assert not plugin.backup_path(path).exists()
+    assert list(path.parent.iterdir()) == []
+
+
 def test_render_starts_the_game_again_after_a_take_that_plays_past_the_end_of_the_match(env):
     from types import SimpleNamespace
 
