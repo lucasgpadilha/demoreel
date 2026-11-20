@@ -21,6 +21,8 @@ _DISPLAY = {
     "flashbang": "Flashbang", "smokegrenade": "Smoke", "decoy": "Decoy",
     "taser": "Zeus x27", "knife": "Knife", "bayonet": "Knife", "planted_c4": "C4", "c4": "C4",
     "world": "World", "worldspawn": "World",
+    # the same guns with the silencer taken off: one weapon to whoever reads a ranking
+    "m4a1_silencer_off": "M4A1-S", "usp_silencer_off": "USP-S",
 }
 
 _CLASS = {
