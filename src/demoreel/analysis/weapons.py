@@ -21,9 +21,10 @@ _DISPLAY = {
     "flashbang": "Flashbang", "smokegrenade": "Smoke", "decoy": "Decoy",
     "taser": "Zeus x27", "knife": "Knife", "bayonet": "Knife", "planted_c4": "C4", "c4": "C4",
     "world": "World", "worldspawn": "World",
-    # the same guns with the silencer taken off: one weapon to whoever reads a ranking
-    "m4a1_silencer_off": "M4A1-S", "usp_silencer_off": "USP-S",
 }
+# The same guns with the silencer taken off, which the game reports under a name of their own: one weapon to
+# whoever reads a ranking. Kept out of _DISPLAY, which other modules read back from display name to game name.
+_SAME_GUN = {"m4a1_silencer_off": "m4a1_silencer", "usp_silencer_off": "usp_silencer"}
 
 _CLASS = {
     "rifle": {"ak47", "m4a1", "m4a1_silencer", "m4a4", "aug", "sg556", "famas", "galilar"},
@@ -51,6 +52,7 @@ def normalize(weapon: str | None) -> str:
 
 def display_name(weapon: str | None) -> str:
     w = normalize(weapon)
+    w = _SAME_GUN.get(w, w)
     return _DISPLAY.get(w, w.replace("_", " ").title())
 
 
