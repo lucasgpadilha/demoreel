@@ -1,12 +1,13 @@
-"""Insights across matches: nights, rivalries, player profiles, trophies and chat rankings.
+"""Insights across matches: nights, rivalries, player profiles, weapon rankings, trophies and chat rankings.
 
 Nothing here reads a demo. Everything is aggregated from the analyses already stored, so it is cheap and it
 covers every match the database has. Two layers:
 
 * pure functions over a list of :class:`Entry` (an analysis plus when it was played) - ``rivalries_of``,
-  ``profile_of``, ``trophies_of``, ``chat_rankings_of``, ``nights_of``, ``players_of``;
-* the same with a database session and a :class:`Scope` - ``rivalries``, ``player_profile``, ``trophies``,
-  ``chat_rankings``, ``nights``, ``players`` - which is what the REST API and the MCP server call.
+  ``profile_of``, ``weapon_rankings_of``, ``trophies_of``, ``chat_rankings_of``, ``nights_of``, ``players_of``;
+* the same with a database session and a :class:`Scope` - ``rivalries``, ``player_profile``,
+  ``weapon_rankings``, ``trophies``, ``chat_rankings``, ``nights``, ``players`` - which is what the REST API
+  and the MCP server call.
 
 Players are SteamIDs; bots (``BOT:<name>``) never appear in a ranking. Definitions are documented in
 ``docs/metrics.md`` ("Across matches") - change code, doc and a test together.
@@ -53,6 +54,9 @@ from .schemas import (
     TrophiesOut,
     TrophyOut,
     TrophyRunnerUp,
+    WeaponPlayer,
+    WeaponRanking,
+    WeaponRankingsOut,
 )
 
 NIGHT_SHIFT = timedelta(hours=12)  # a night runs from noon to noon: a match at 02:00 belongs to the day before
@@ -861,22 +865,63 @@ def _play(e: Entry, h: HighlightCandidate) -> ProfilePlay:
                        featured=h.featured)
 
 
-def _weapon_stats(entries: list[Entry], steamid: str) -> list[ProfileWeapon]:
-    """His kills by weapon (the same kills as the scoreboard: no suicides, no team kills), with headshots."""
-    kills: Counter = Counter()
-    heads: Counter = Counter()
+def _kills_by_weapon(entries: list[Entry]) -> dict[str, dict[str, list[int]]]:
+    """SteamID -> weapon display name -> ``[kills, headshot kills]``, from the same kills as the scoreboard
+    (no suicides, no team kills)."""
+    out: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
     for e in entries:
         for r in e.analysis.rounds:
             for k in r.kills:
-                if k.attacker is None or k.attacker.steamid != steamid or k.is_suicide or k.is_teamkill:
+                if k.attacker is None or k.is_suicide or k.is_teamkill:
                     continue
-                w = weapons.display_name(k.weapon)
-                kills[w] += 1
-                heads[w] += k.headshot
-    total = sum(kills.values())
-    return [ProfileWeapon(weapon=w, kills=n, headshots=heads[w], headshot_pct=round(100.0 * heads[w] / n, 1),
+                row = out[k.attacker.steamid][weapons.display_name(k.weapon)]
+                row[0] += 1
+                row[1] += bool(k.headshot)
+    return out
+
+
+def _weapon_stats(entries: list[Entry], steamid: str) -> list[ProfileWeapon]:
+    """His kills by weapon (the same kills as the scoreboard: no suicides, no team kills), with headshots."""
+    mine = _kills_by_weapon(entries).get(steamid, {})
+    total = sum(n for n, _h in mine.values())
+    return [ProfileWeapon(weapon=w, kills=n, headshots=h, headshot_pct=round(100.0 * h / n, 1),
                           share_pct=round(100.0 * n / total, 1))
-            for w, n in sorted(kills.items(), key=lambda x: (-x[1], x[0]))]
+            for w, (n, h) in sorted(mine.items(), key=lambda x: (-x[1][0], x[0]))]
+
+
+def weapon_rankings_of(entries: list[Entry], scope: Scope | None = None, *, weapon: str | None = None,
+                       limit: int | None = None) -> WeaponRankingsOut:
+    """For each weapon, who killed the most with it: the per-weapon numbers of every profile (``weapon_stats``)
+    turned around. ``weapon`` keeps one weapon (display name such as "AK-47" or the game's name such as "ak47");
+    ``limit`` keeps that many players per weapon."""
+    names = _names(entries)
+    played = {sid: t.matches for sid, t in _totals(entries).items()}
+    by_weapon: dict[str, list[WeaponPlayer]] = defaultdict(list)
+    for sid, mine in _kills_by_weapon(entries).items():
+        if is_bot(sid):
+            continue
+        total = sum(n for n, _h in mine.values())
+        for w, (n, h) in mine.items():
+            by_weapon[w].append(WeaponPlayer(
+                player=_ref(sid, names), matches=played.get(sid, 0), kills=n, headshots=h,
+                headshot_pct=round(100.0 * h / n, 1), share_pct=round(100.0 * n / total, 1)))
+    if weapon is not None:
+        wanted = {weapon.strip().casefold(), weapons.display_name(weapon.strip()).casefold()}
+        keep = [w for w in by_weapon if w.casefold() in wanted]
+        if not keep:
+            known = sorted(by_weapon, key=lambda w: (-sum(p.kills for p in by_weapon[w]), w))
+            raise service.NotFound(
+                f"Nobody killed with {weapon!r} in the {len(entries)} matches of this scope. "
+                + (f"Weapons with kills: {', '.join(known)}." if known else "There are no kills in this scope."))
+        by_weapon = {w: by_weapon[w] for w in keep}
+    rows = []
+    for w, players in by_weapon.items():
+        players.sort(key=lambda p: (-p.kills, -p.headshots, p.player.name.lower(), p.player.steamid))
+        kills, heads = sum(p.kills for p in players), sum(p.headshots for p in players)
+        rows.append(WeaponRanking(weapon=w, kills=kills, headshots=heads, headshot_pct=round(100.0 * heads / kills, 1),
+                                  total_players=len(players), players=players[:limit] if limit else players))
+    rows.sort(key=lambda r: (-r.kills, r.weapon))
+    return WeaponRankingsOut(scope=_scope_out(entries, scope), weapons=rows)
 
 
 def profile_of(entries: list[Entry], steamid: str, scope: Scope | None = None) -> PlayerProfileOut:
@@ -980,3 +1025,8 @@ def trophies(s: Session, scope: Scope | None = None) -> TrophiesOut:
 
 def chat_rankings(s: Session, scope: Scope | None = None) -> ChatRankingsOut:
     return chat_rankings_of(load_entries(s, scope), scope)
+
+
+def weapon_rankings(s: Session, scope: Scope | None = None, weapon: str | None = None,
+                    limit: int | None = None) -> WeaponRankingsOut:
+    return weapon_rankings_of(load_entries(s, scope), scope, weapon=weapon, limit=limit)

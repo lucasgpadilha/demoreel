@@ -50,7 +50,7 @@ server or `demoreel worker` running so analyses and renders get processed.
 | `get_job`, `get_render`, `cancel_job` | Follow long-running work |
 | `import_demo` | Analyze a demo already on the server's disk (whitelisted folders only) |
 | `get_capabilities` | Which renderers this server has |
-| `list_nights`, `get_rivalries`, `get_player_profile`, `get_trophies`, `get_chat_rankings` | Across matches: nights of play, who kills whom (nemesis / favourite victim), one player over the season, trophies of a match or a night, chat rankings for banter. All take `night=YYYY-MM-DD` or `match_id`; no filter = every match |
+| `list_nights`, `get_rivalries`, `get_player_profile`, `get_weapon_rankings`, `get_trophies`, `get_chat_rankings` | Across matches: nights of play, who kills whom (nemesis / favourite victim), one player over the season, who kills the most with each weapon, trophies of a match or a night, chat rankings for banter. All take `night=YYYY-MM-DD` or `match_id`; no filter = every match |
 
 Also: prompt `make_highlight_reel(match_id, player?)` and resource `demoreel://matches/{id}/analysis`.
 

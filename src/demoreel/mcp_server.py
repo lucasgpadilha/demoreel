@@ -57,6 +57,7 @@ Typical flows
 - "Who owns whom? Who cried the most last night? Give out the trophies" -> list_nights -> get_rivalries /
   get_trophies / get_chat_rankings (all take night=YYYY-MM-DD or match_id; no filter = every match) ->
   get_player_profile for one player across matches.
+- "Who has the most AWP kills this season?" -> get_weapon_rankings(weapon="AWP").
 
 Players can be referred to by SteamID or by (part of) their in-game name.
 """
@@ -579,6 +580,28 @@ def build_server() -> MCPServer:
             out = insights.player_profile(s, insights.resolve_player(s, player, scope), scope)
         data = out.model_dump(mode="json", exclude_none=True, exclude={"scope"})
         return {**data, "scope": _scope_brief(out.scope), "history": data["history"][:10]}
+
+    @mcp.tool(annotations=READ, description=(
+        "Kills by weapon across matches: for each weapon, who killed the most with it (scoreboard kills: no "
+        "suicides, no team kills; bots left out). Weapons come most kills first; each player has his kills and "
+        "headshots with the weapon, the share of his own kills made with it and the matches he played. Give "
+        "`weapon` ('AK-47', 'awp', 'Desert Eagle') for one weapon; an unknown one lists the weapons with kills. "
+        "No filter = every match."))
+    @_threaded
+    def get_weapon_rankings(weapon: Annotated[str | None, Field(description="One weapon, by display or game "
+                                                                               "name. Default: all.")] = None,
+                            night: Night = None, match_id: str | None = None, since: Since = None,
+                            until: Until = None,
+                            limit: Annotated[int, Field(ge=1, le=100, description="Players per weapon.")] = 5
+                            ) -> dict[str, Any]:
+        with session_scope() as s:
+            out = insights.weapon_rankings(s, _scope(night, match_id, since, until), weapon, limit)
+        return {"scope": _scope_brief(out.scope),
+                "weapons": [{"weapon": w.weapon, "kills": w.kills, "headshot_pct": w.headshot_pct,
+                             "total_players": w.total_players,
+                             "players": [{"player": p.player.name, "steamid": p.player.steamid, "kills": p.kills,
+                                          "headshots": p.headshots, "share_pct": p.share_pct, "matches": p.matches}
+                                         for p in w.players]} for w in out.weapons]}
 
     @mcp.tool(annotations=READ, description=(
         "Trophies of one match (`match_id`) or one night (`night`; default: the most recent night): MVP, clutch "
