@@ -20,13 +20,14 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..base import RenderCancelled, RenderError
+from ..base import RecorderBusy, RenderCancelled, RenderError
 from . import procs
 from .settings import IngameSettings
 
@@ -196,24 +197,44 @@ class RecordingLock:
             return False
 
 
+_HELD: dict[tuple[str, int], RecordingLock] = {}  # the locks this process holds, by file and thread
+# Asking whether the lock is held (the doctor, an idle worker) takes it for an instant: that is not a recording.
+PROBE_GRACE_S = 0.25
+
+
 @contextmanager
 def recording_lock(path: Path, wait_s: float = 0.0, cancelled: Callable[[], bool] = lambda: False,
                    on_wait: Callable[[float], None] = lambda waited: None,
                    poll_s: float = 1.0) -> Iterator[RecordingLock]:
+    """Hold this machine's one-recording-at-a-time lock, waiting up to ``wait_s`` for another process to let
+    go of it (:class:`RecorderBusy` after that).
+
+    Re-entrant: code that already holds it enters again at once. A job that records several times in a row
+    takes it once around all of them, so no other recording gets the game in between."""
+    key = (os.path.normcase(os.path.abspath(path)), threading.get_ident())
+    held = _HELD.get(key)
+    if held is not None:
+        yield held
+        return
     lock = RecordingLock(path)
     started = time.monotonic()
     while not lock.try_acquire():
         waited = time.monotonic() - started
         if cancelled():
             raise RenderCancelled("Render cancelled while waiting for another in-game recording.")
-        if waited >= wait_s:
-            raise RenderError("Another in-game recording is running on this machine (only one CS2 instance can "
-                              "record at a time). Try again when it is finished.")
+        if waited >= max(wait_s, PROBE_GRACE_S):
+            raise RecorderBusy("Another in-game recording is running on this machine (only one CS2 instance can "
+                               "record at a time). Try again when it is finished.")
+        if waited < PROBE_GRACE_S:
+            time.sleep(0.05)
+            continue
         on_wait(waited)
         time.sleep(min(poll_s, max(0.05, wait_s - waited)))
+    _HELD[key] = lock
     try:
         yield lock
     finally:
+        _HELD.pop(key, None)
         lock.release()
 
 

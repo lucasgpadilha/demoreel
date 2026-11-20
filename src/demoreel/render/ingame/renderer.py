@@ -22,14 +22,15 @@ import re
 import shlex
 import shutil
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from .. import ffmpeg
 from ..base import Availability, RenderCancelled, RenderError, RenderJob, RenderResult
 from . import actions, encode, launcher, plugin, procs, slots, staging, xray
-from .settings import IngameSettings
+from .settings import IngameSettings, default_lock_path
 from .settings import load as load_settings
 
 # "startmovie": the game's own recorder (image files, then encoded) - works on Windows and Linux.
@@ -120,6 +121,26 @@ class IngameRenderer:
 
     def settings(self) -> IngameSettings:
         return self._settings if self._settings is not None else load_settings()
+
+    # --- one recording at a time ------------------------------------------------------------------------
+
+    def _lock_path(self) -> Path:
+        return self._settings.lock_path if self._settings is not None else default_lock_path()
+
+    def recorder_taken(self) -> bool:
+        """Is another process recording with the game on this machine right now? Cheap; never raises."""
+        try:
+            return launcher.RecordingLock(self._lock_path()).is_held_elsewhere()
+        except Exception:  # noqa: BLE001
+            return False
+
+    @contextmanager
+    def recorder(self, wait_s: float = 0.0, cancelled: Callable[[], bool] = lambda: False,
+                 on_wait: Callable[[float], None] = lambda waited: None) -> Iterator[None]:
+        """Keep this machine's recorder for several :meth:`render` calls in a row: nothing else gets the game
+        in between. Raises :class:`RecorderBusy` when another process still has it after ``wait_s``."""
+        with launcher.recording_lock(self._lock_path(), wait_s, cancelled, on_wait):
+            yield
 
     # --- availability ---------------------------------------------------------------------------------
 

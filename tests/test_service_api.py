@@ -148,6 +148,146 @@ def test_job_queue_claim_and_run():
     assert seen["payload"] == {"x": 1}
 
 
+def test_work_this_machine_cannot_start_now_waits_in_the_queue_in_its_order(monkeypatch):
+    from contextlib import contextmanager
+    from datetime import timedelta
+
+    init_db()
+    ran: list = []
+    state = {"taken": True, "defer": 0, "held": 0}
+
+    @contextmanager
+    def take_game():
+        if state["taken"]:
+            raise jobs.Taken()
+        state["held"] += 1
+        try:
+            yield
+        finally:
+            state["held"] -= 1
+
+    @jobs.handler("test_game")
+    def _game(ctx: jobs.JobContext):
+        assert state["held"] == 1  # the worker took the game before the job, and keeps it while it runs
+        if state["defer"]:
+            state["defer"] -= 1
+            raise jobs.JobDeferred("Waiting for the game")
+        ran.append(ctx.payload["n"])
+
+    @jobs.handler("test_edit")
+    def _edit(ctx: jobs.JobContext):
+        assert state["held"] == 0  # work that needs no game does not keep it from the others
+        ran.append("edit")
+
+    @jobs.handler("test_cancelled_meanwhile")
+    def _cancelled_meanwhile(ctx: jobs.JobContext):
+        with session_scope() as s:
+            jobs.request_cancel(s, s.get(Job, ctx.job_id))
+        raise jobs.JobDeferred("Waiting for the game")
+
+    monkeypatch.setitem(jobs.RESERVE, "testgame", take_game)
+    with session_scope() as s:
+        first = jobs.enqueue(s, "test_game", {"n": 1}, capability="testgame", priority=10)
+        second = jobs.enqueue(s, "test_game", {"n": 2}, capability="testgame", priority=10)
+        first.created_at = second.created_at - timedelta(seconds=30)
+        jobs.enqueue(s, "test_edit", {}, capability="testcpu", priority=50)
+        first, second = first.id, second.id
+    caps = ["testcpu", "testgame"]
+    assert jobs.run_one("w", caps) and ran == ["edit"]  # the game is taken: the worker edits instead...
+    assert not jobs.run_one("w", caps)  # ...and leaves the recordings where they are
+    with session_scope() as s:
+        assert s.get(Job, first).status == "queued" and s.get(Job, first).attempts == 0
+
+    state.update(taken=False, defer=1)  # free again, but the handler still finds it cannot record right now
+    assert not jobs.run_one("w", caps) and state["held"] == 0
+    with session_scope() as s:
+        j = s.get(Job, first)
+        assert (j.status, j.attempts, j.worker_id, j.message) == ("queued", 0, None, "Waiting for the game")
+        assert s.get(Job, second).status == "queued"
+    assert jobs.run_one("w", caps) and jobs.run_one("w", caps)
+    assert ran == ["edit", 1, 2]  # the one that had to step back was still the first to record
+
+    with session_scope() as s:
+        gone = jobs.enqueue(s, "test_cancelled_meanwhile", {}, capability="testgame").id
+    assert jobs.run_one("w", caps)
+    with session_scope() as s:
+        assert s.get(Job, gone).status == "canceled"  # not put back in the queue to run later
+
+
+def test_a_recording_that_finds_the_game_taken_goes_back_to_the_queue(match_id, monkeypatch):
+    """A recording job does not wait for the game on a worker - it used to give up after half an hour there,
+    and whoever arrived first was not the first served. It returns to the queue untouched; nothing failed."""
+    from contextlib import contextmanager
+
+    from demoreel import tasks
+    from demoreel.db import Render
+    from demoreel.render.base import Availability, RecorderBusy
+
+    class TakenGame:
+        name, description = "ingame", "fake"
+        asked: list[float] = []
+
+        def availability(self):
+            return Availability(ok=True)
+
+        @contextmanager
+        def recorder(self, wait_s=0.0, cancelled=None, on_wait=None):
+            self.asked.append(wait_s)
+            raise RecorderBusy("Another in-game recording is running on this machine.")
+            yield
+
+        def render(self, job):
+            raise AssertionError("the game was taken: nothing may be recorded")
+
+    game, events = TakenGame(), []
+    monkeypatch.setattr(tasks, "get_renderer", lambda name: game)
+    monkeypatch.setattr(tasks, "emit", lambda name, data: events.append(name))
+    monkeypatch.setattr(get_settings(), "ingame_enabled", True)
+    hid = first_highlight(match_id)
+    with session_scope() as s:
+        r, job = service.create_render(s, match_id, [hid], renderer="radar")
+        r.renderer, job.capability = "ingame", "testrecord"  # first person, and the footage does not exist yet
+        rid, jid = r.id, job.id
+
+    assert not jobs.run_one("w", ["testrecord"])
+    with session_scope() as s:
+        j = s.get(Job, jid)
+        assert (j.status, j.attempts, j.worker_id, j.error) == ("queued", 0, None, None)
+        assert j.message == tasks.WAITING_FOR_GAME
+        assert s.get(Render, rid).status == "queued" and s.get(Render, rid).error is None
+    assert events == [] and game.asked == [0.0]  # no "render.failed" went out, and it did not sit waiting
+
+    with pytest.raises(jobs.JobDeferred):  # the recording of a whole match steps back the same way
+        tasks.capture_match(jobs.JobContext(job_id="j_none", payload={"match_id": match_id, "highlight_ids": [hid]}))
+    with pytest.raises(jobs.JobDeferred):  # a job may ask to wait a little first; it is still not a failure
+        tasks.capture_match(jobs.JobContext(job_id="j_none", payload={
+            "match_id": match_id, "highlight_ids": [hid], "extra": {"ingame_lock_wait_s": 5}}))
+    assert game.asked == [0.0, 0.0, 5.0]
+
+
+def test_a_worker_takes_the_game_before_it_takes_a_recording_job():
+    """Only the worker that has the game looks at recording jobs, so two workers can never pick one each and
+    then let the later job record first."""
+    from demoreel import tasks
+    from demoreel.render.ingame import launcher
+    from demoreel.render.ingame.settings import default_lock_path
+
+    assert jobs.RESERVE["ingame"] is tasks._take_game
+    other = launcher.RecordingLock(default_lock_path())  # another process recording on this machine
+    assert other.try_acquire()
+    try:
+        with pytest.raises(jobs.Taken), tasks._take_game():
+            pass
+    finally:
+        other.release()
+    with tasks._take_game():
+        assert other.is_held_elsewhere()  # kept for as long as the job runs
+        with tasks._recorder(jobs.JobContext(job_id="j_none", payload={}), {}):  # the job's own use is free
+            pass
+        assert other.is_held_elsewhere()
+    assert not other.is_held_elsewhere()
+
+
 # ------------------------------------------------------------------------------------------- HTTP
 
 def test_health_and_capabilities(client):

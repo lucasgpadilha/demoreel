@@ -265,6 +265,12 @@ def _default_data_dir() -> Path:
         return Path(os.environ.get("DEMOREEL_DATA_DIR") or "data")
 
 
+def default_lock_path() -> Path:
+    """The recording lock of the default data folder, without any of the detection :func:`load` runs: idle
+    workers ask whether the recorder is taken about once a second."""
+    return _default_data_dir().expanduser().absolute() / "ingame" / "recording.lock"
+
+
 def _env_path(env: Mapping[str, str], name: str) -> Path | None:
     raw = (env.get(name) or "").strip().strip('"')
     return Path(raw).expanduser() if raw else None

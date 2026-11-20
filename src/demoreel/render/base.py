@@ -26,6 +26,11 @@ class RenderCancelled(RenderError):
     pass
 
 
+class RecorderBusy(RenderError):
+    """This machine's recorder is taken by another process. Nothing is wrong with the render itself: it can
+    run when the recorder is free (a queued job goes back to the queue instead of failing)."""
+
+
 @dataclass
 class ClipSegment:
     start_tick: int
