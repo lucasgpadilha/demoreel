@@ -126,9 +126,10 @@ Tools: `list_matches`, `get_match`, `get_player_stats`, `list_rounds`, `get_roun
 `list_highlights`, `get_highlight`, `create_highlight`, `edit_highlight`, `delete_highlight`,
 `render_highlight`, `render_reel`, `get_job`, `get_render`, `cancel_job`, `get_feed`, `list_source_matches`,
 `import_matches`, `import_demo`, `produce_match`, `get_brand`, `get_capabilities`,
-`list_nights`, `get_rivalries`, `get_player_profile`, `get_trophies`, `get_chat_rankings` (insights across
-matches: who owns whom, each night's trophies, the cry-baby ranking of the chat — see
-[docs/metrics.md](docs/metrics.md#across-matches-rivalries-trophies-chat-rankings))
+`list_nights`, `get_rivalries`, `get_player_profile`, `get_weapon_rankings`, `get_trophies`,
+`get_chat_rankings` (insights across matches: who owns whom, who kills the most with each weapon, each night's
+trophies, the cry-baby ranking of the chat — see
+[docs/metrics.md](docs/metrics.md#across-matches-rivalries-weapon-rankings-trophies-chat-rankings))
 — plus a `make_highlight_reel` prompt and the full analysis as a resource. Then just ask:
 
 > *"Look at the last match, find biruta's best moment, cut it down to the three kills, slow down the last

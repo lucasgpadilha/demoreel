@@ -57,6 +57,7 @@ from .schemas import (
     SourceOut,
     TrophiesOut,
     UploadResult,
+    WeaponRankingsOut,
     WebhookIn,
     WebhookOut,
     WorkerClaim,
@@ -683,6 +684,20 @@ def insight_players(scope: insights.Scope = Depends(_insight_scope)) -> list[Pla
 def insight_player(steamid: str, scope: insights.Scope = Depends(_insight_scope)) -> PlayerProfileOut:
     with session_scope() as s:
         return insights.player_profile(s, steamid, scope)
+
+
+@api.get("/insights/weapons", response_model=WeaponRankingsOut, tags=["insights"],
+         summary="Kills by weapon: for each weapon, who killed the most with it",
+         description="The same kills as the scoreboard (no suicides, no team kills), bots left out. Weapons "
+                     "and players come most kills first; each player row has his headshots with the weapon, "
+                     "the share of his kills made with it and the matches he played in the scope.")
+def insight_weapons(scope: insights.Scope = Depends(_insight_scope),
+                    weapon: str | None = Query(None, description="Only this weapon: display name ('AK-47') or "
+                                                                 "the game's name ('ak47')."),
+                    limit: int | None = Query(None, ge=1, le=500, description="Players per weapon. Default: all.")
+                    ) -> WeaponRankingsOut:
+    with session_scope() as s:
+        return insights.weapon_rankings(s, scope, weapon, limit)
 
 
 @api.get("/insights/trophies", response_model=TrophiesOut, tags=["insights"],

@@ -349,6 +349,42 @@ def test_players_of_lists_humans(night_analysis):
     assert rows[0].matches == 2 and rows[0].rounds == 14
 
 
+# ------------------------------------------------------------------------------------------- weapons
+
+def test_weapon_rankings_turn_the_profiles_around(night_analysis):
+    es = entries(night_analysis, night_analysis, with_bot(night_analysis, "ct1"))  # a bot plays for ct1 in the third
+    out = insights.weapon_rankings_of(es)
+    assert [(w.weapon, w.kills, w.headshots, w.headshot_pct, w.total_players) for w in out.weapons] == [
+        ("AK-47", 73, 6, 8.2, 6), ("Knife", 2, 0, 0.0, 1)]  # most kills first; the bot's six kills are nobody's
+    ak, knife = out.weapons
+    # most kills first, then headshots, then name; `matches` is what he played, whatever the weapon
+    assert [(p.player.steamid, p.matches, p.kills, p.headshots, p.share_pct) for p in ak.players] == [
+        ("t5", 3, 15, 0, 100.0), ("ct2", 3, 12, 0, 100.0), ("t1", 3, 12, 0, 100.0), ("t2", 3, 12, 0, 100.0),
+        ("t3", 3, 12, 0, 100.0), ("ct1", 2, 10, 6, 83.3)]
+    assert [(p.player.name, p.kills, p.headshot_pct, p.share_pct) for p in knife.players] == [("CT1", 2, 0.0, 16.7)]
+    assert out.scope.matches == ["m1", "m2", "m3"]
+    # every row is the row of that player's profile
+    for w in out.weapons:
+        for p in w.players:
+            mine = next(x for x in insights.profile_of(es, p.player.steamid).weapon_stats if x.weapon == w.weapon)
+            assert (mine.kills, mine.headshots, mine.headshot_pct, mine.share_pct) == (
+                p.kills, p.headshots, p.headshot_pct, p.share_pct)
+    # team kills are not kills: ct3 shot ct4 in round 1 of every match and is in no ranking
+    assert not any(p.player.steamid in ("ct3", "BOT:Zed") for w in out.weapons for p in w.players)
+
+
+def test_one_weapon_by_either_name_a_limit_and_an_error_that_lists_the_weapons(night_analysis):
+    es = entries(night_analysis, night_analysis)
+    for name in ("AK-47", "ak-47", "ak47", "weapon_ak47"):
+        (ak,) = insights.weapon_rankings_of(es, weapon=name, limit=2).weapons
+        assert (ak.weapon, ak.total_players) == ("AK-47", 6)
+        assert [p.player.steamid for p in ak.players] == ["ct1", "t5"]  # 10 kills each, ct1 has the headshots
+    with pytest.raises(service.NotFound) as err:
+        insights.weapon_rankings_of(es, weapon="awp")
+    assert "'awp'" in str(err.value) and "Weapons with kills: AK-47, Knife." in str(err.value)
+    assert insights.weapon_rankings_of([]).weapons == []
+
+
 # ------------------------------------------------------------------------------------------- database, REST, MCP
 
 def seed(a: MatchAnalysis, played_at: datetime | None) -> str:
@@ -453,6 +489,14 @@ def test_insight_endpoints(client, season):
     assert clutcher["clutches_by_size"] == {"1v5": 2} and clutcher["best_plays"][0]["highlight_id"]
     assert profile["victim"]["player"]["steamid"] == "t1" and profile["chat"]["death_cries"] == 6
 
+    guns = client.get("/api/v1/insights/weapons", params={"night": "2021-03-05"}).json()
+    assert [(w["weapon"], w["kills"]) for w in guns["weapons"]] == [("AK-47", 52), ("Knife", 2)]
+    assert guns["scope"]["matches"] == [m1, m2] and len(guns["weapons"][0]["players"]) == 6
+    one = client.get("/api/v1/insights/weapons", params={"weapon": "knife", "limit": 1, **WINDOW}).json()
+    (knife,) = one["weapons"]
+    assert knife["players"] == [{"player": {"steamid": "ct1", "name": "CT1"}, "matches": 3, "kills": 3,
+                                 "headshots": 0, "headshot_pct": 0.0, "share_pct": 16.7}]
+
     night = client.get("/api/v1/insights/trophies", params={"night": "2021-03-05"}).json()
     assert night["kind"] == "night" and {t["key"]: t["player"]["steamid"] for t in night["trophies"]}["baiter"] == "ct5"
     match = client.get("/api/v1/insights/trophies", params={"match_id": m3}).json()
@@ -474,6 +518,9 @@ def test_insight_endpoint_errors_say_what_is_valid(client, season):
     assert r.status_code == 404 and "2021-03-12, 2021-03-05" in r.json()["detail"]
     r = client.get("/api/v1/insights/players/76561190000000000", params=WINDOW)
     assert r.status_code == 404 and "CT1 (ct1)" in r.json()["detail"]
+    r = client.get("/api/v1/insights/weapons", params={"weapon": "bazooka", **WINDOW})
+    assert r.status_code == 404 and "Weapons with kills: AK-47, Knife." in r.json()["detail"]
+    assert client.get("/api/v1/insights/weapons", params={"limit": 0}).status_code == 422
     assert client.get("/api/v1/insights/rivalries", params={"match_id": "m_nope"}).status_code == 404
     assert client.get("/api/v1/insights/chat", params={"night": "05/03/2021"}).status_code == 422
     assert client.get("/api/v1/insights/rivalries", params={"until": "2020-01-01T00:00:00Z"}).json()["pairs"] == []
@@ -492,7 +539,8 @@ def test_mcp_tools_mirror_the_service(season):
         return data["result"] if set(data) == {"result"} else data
 
     names = {t.name for t in anyio.run(server.list_tools)}
-    assert {"list_nights", "get_rivalries", "get_player_profile", "get_trophies", "get_chat_rankings"} <= names
+    assert {"list_nights", "get_rivalries", "get_player_profile", "get_trophies", "get_chat_rankings",
+            "get_weapon_rankings"} <= names
     assert any(n["date"] == "2021-03-05" and n["matches"] == season[:2] for n in call("list_nights"))
 
     riv = call("get_rivalries", player="CT1", night="2021-03-05")  # by name
@@ -506,8 +554,15 @@ def test_mcp_tools_mirror_the_service(season):
     assert "not moderation" in chat["note"]
     assert chat["podiums"]["talker"]["entries"][0]["player"] == "CT1" and list(chat["podiums"])[0] == "toxic"
 
+    guns = call("get_weapon_rankings", night="2021-03-05", limit=1)
+    assert [(w["weapon"], w["kills"], w["total_players"]) for w in guns["weapons"]] == [("AK-47", 52, 6), ("Knife", 2, 1)]
+    assert guns["weapons"][0]["players"] == [{"player": "CT1", "steamid": "ct1", "kills": 10, "headshots": 6,
+                                              "share_pct": 83.3, "matches": 2}]
+    assert call("get_weapon_rankings", weapon="knife", match_id=season[0])["weapons"][0]["players"][0]["kills"] == 1
+
     for name, args, fragment in (("get_player_profile", {"player": "nobody", "night": "2021-03-05"}, "No player matches"),
                                  ("get_trophies", {"night": "5 de março"}, "YYYY-MM-DD"),
+                                 ("get_weapon_rankings", {"weapon": "bazooka", "night": "2021-03-05"}, "Weapons with kills"),
                                  ("get_rivalries", {"night": "2021-01-01", "since": WINDOW["since"]}, "Nights with matches")):
         with pytest.raises(ToolError) as err:  # the SDK's error carries the service message
             call(name, **args)

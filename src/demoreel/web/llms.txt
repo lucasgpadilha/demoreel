@@ -31,7 +31,8 @@ Base URL: {BASE_URL}
 6. Optional: `POST /api/v1/webhooks` to be called on `match.ready`, `render.ready`, etc.
 7. Across matches (all GET; filters `night=YYYY-MM-DD`, `match_id`, `since`, `until`; none = every match):
    `/api/v1/insights/nights` · `/insights/rivalries` (who kills whom, nemesis / favourite victim) ·
-   `/insights/players` · `/insights/players/{steamid}` · `/insights/trophies` (one match or one night) ·
+   `/insights/players` · `/insights/players/{steamid}` · `/insights/weapons?weapon=&limit=` (who kills the
+   most with each weapon) · `/insights/trophies` (one match or one night) ·
    `/insights/chat` (banter rankings of the all-chat, not moderation).
 
 ## Concepts
