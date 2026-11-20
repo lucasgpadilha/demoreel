@@ -412,6 +412,7 @@ class InsightScope(BaseModel):
     until: UTCDateTime | None = None
     night: str | None = Field(None, description="YYYY-MM-DD: the evening the night started (local time).")
     match_id: str | None = None
+    excluded: list[str] = Field(default_factory=list, description="Match ids the request asked to leave out.")
     matches: list[str] = Field(default_factory=list, description="Ids of the matches used, oldest first.")
     nights: list[str] = Field(default_factory=list, description="Nights (YYYY-MM-DD) those matches belong to.")
     rounds: int = 0

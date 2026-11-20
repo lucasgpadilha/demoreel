@@ -137,6 +137,10 @@ def get_brand() -> BrandOut:
     return service.brand_out()
 
 
+_EXCLUDE = ("Match ids to leave out, whatever the other filters say (repeat the parameter: "
+            "`exclude=m_1&exclude=m_2`). For a site that hid a match and wants it out of every number.")
+
+
 @api.get("/feed", response_model=list[FeedItem], tags=["highlights"],
          summary="Best plays that already have a video, across all matches")
 def get_feed(limit: int = Query(24, ge=1, le=200), player: str | None = Query(None, description="SteamID."),
@@ -147,11 +151,13 @@ def get_feed(limit: int = Query(24, ge=1, le=200), player: str | None = Query(No
              until: datetime | None = Query(None, description="…and before this moment."),
              offset: int = Query(0, ge=0, description="Skip this many plays (paging)."),
              category: str = Query("play", pattern="^(play|fail|all)$", description="play | fail | all."),
+             exclude: list[str] = Query(default_factory=list, description=_EXCLUDE),
              response: Response = None) -> list[FeedItem]:  # type: ignore[assignment]
     total: list[int] = []
     with session_scope() as s:
         items = service.feed(s, limit=limit, player_steamid=player, kind=kind, featured=featured,
-                             since=since, until=until, offset=offset, total=total, category=category)
+                             since=since, until=until, offset=offset, total=total, category=category,
+                             exclude=exclude)
     if response is not None and total:
         response.headers["X-Total-Count"] = str(total[0])  # plays matching the filters, before limit/offset
         response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
@@ -649,15 +655,17 @@ def _insight_scope(
     night: date | None = Query(None, description="One night, YYYY-MM-DD: the evening it started, local time "
                                                  "(matches after midnight belong to the night before)."),
     match_id: str | None = Query(None, description="One match."),
+    exclude: list[str] = Query(default_factory=list, description=_EXCLUDE),
 ) -> insights.Scope:
-    return insights.Scope(since=since, until=until, night=night, match_id=match_id)
+    return insights.Scope(since=since, until=until, night=night, match_id=match_id, exclude=frozenset(exclude))
 
 
 @api.get("/insights/nights", response_model=list[NightOut], tags=["insights"],
          summary="Nights that have analyzed matches, newest first")
-def insight_nights(since: datetime | None = None, until: datetime | None = None) -> list[NightOut]:
+def insight_nights(since: datetime | None = None, until: datetime | None = None,
+                   exclude: list[str] = Query(default_factory=list, description=_EXCLUDE)) -> list[NightOut]:
     with session_scope() as s:
-        return insights.nights(s, insights.Scope(since=since, until=until))
+        return insights.nights(s, insights.Scope(since=since, until=until, exclude=frozenset(exclude)))
 
 
 @api.get("/insights/rivalries", response_model=RivalriesOut, tags=["insights"],
