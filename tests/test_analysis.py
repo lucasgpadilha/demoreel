@@ -22,6 +22,8 @@ def test_player_id_and_sides():
 def test_weapon_names():
     assert weapons.normalize("weapon_knife_karambit") == "knife"
     assert weapons.display_name("m4a1_silencer") == "M4A1-S"
+    # silencer off is still the same gun: it must not be a weapon of its own in the by-weapon numbers
+    assert weapons.display_name("m4a1_silencer_off") == "M4A1-S" and weapons.display_name("weapon_usp_silencer_off") == "USP-S"
     assert weapons.weapon_class("awp") == "sniper"
     assert not weapons.is_bullet_weapon("hegrenade") and weapons.is_bullet_weapon("ak47")
 

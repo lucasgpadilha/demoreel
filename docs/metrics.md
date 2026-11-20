@@ -187,13 +187,13 @@ them over the last seconds of the clip.
 
 All of this is configurable in code (`HighlightConfig`); exposing it per request is on the roadmap.
 
-## Across matches: rivalries, trophies, chat rankings
+## Across matches: rivalries, weapon rankings, trophies, chat rankings
 
 Source of truth: [`insights.py`](../src/demoreel/insights.py). Nothing here reads a demo: it is all added up
 from the stored analyses, so it covers every match in the database. REST: `GET /api/v1/insights/nights`,
-`/insights/rivalries`, `/insights/players`, `/insights/players/{steamid}`, `/insights/trophies`,
-`/insights/chat`. MCP: `list_nights`, `get_rivalries`, `get_player_profile`, `get_trophies`,
-`get_chat_rankings`.
+`/insights/rivalries`, `/insights/players`, `/insights/players/{steamid}`, `/insights/weapons`,
+`/insights/trophies`, `/insights/chat`. MCP: `list_nights`, `get_rivalries`, `get_player_profile`,
+`get_weapon_rankings`, `get_trophies`, `get_chat_rankings`.
 
 ### Scope and nights
 
@@ -234,6 +234,19 @@ his kills; most kills first, ties by name. **ADR** is total damage / total round
 values averaged with rounds played as weights. Best plays (top 5 by score) and worst fails (top 3) come from
 the stored highlights, so they carry ids; fails are also counted by kind. Nemesis and favourite victim as
 above, chat numbers as below, and the list of his matches, newest first.
+
+### Weapon rankings
+
+The **by weapon** numbers of every profile turned around: for each weapon, who killed with it. Same kills as
+the scoreboard (no suicides, no team kills; kills on bots count, kills by bots do not). A weapon is its
+display name (`AK-47`, `Desert Eagle`, `Knife` for every knife; the M4A1-S and the USP-S count as one
+weapon each, silencer on or off). Per weapon: kills and headshot kills of all
+players, HS%, and one row per player with at least one kill with it: kills, headshot kills, HS% with the
+weapon, `share_pct` (that weapon's part of all his kills in the scope) and `matches` (matches of the scope he
+played in, with or without the weapon, so a caller can ask for a minimum). Weapons come most kills first,
+ties by name; players most kills first, ties by more headshots, then name, then SteamID. `weapon` keeps one
+weapon, by display name or the game's name (`ak47`); one nobody killed with is an error that lists the
+weapons with kills. `limit` keeps that many players per weapon (`total_players` still counts them all).
 
 ### Trophies
 

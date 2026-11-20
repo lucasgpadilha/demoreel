@@ -602,6 +602,29 @@ class ProfileWeapon(BaseModel):
     share_pct: float = Field(description="Kills with this weapon / all his kills, in %.")
 
 
+class WeaponPlayer(BaseModel):
+    player: InsightPlayer
+    matches: int = Field(description="Matches of the scope he played in, with or without this weapon.")
+    kills: int
+    headshots: int
+    headshot_pct: float = Field(description="Headshot kills / kills with this weapon, in %.")
+    share_pct: float = Field(description="Kills with this weapon / all his kills in the scope, in %.")
+
+
+class WeaponRanking(BaseModel):
+    weapon: str = Field(description="Display name, e.g. 'AK-47'.")
+    kills: int = Field(description="Kills with this weapon by every player of the scope.")
+    headshots: int
+    headshot_pct: float
+    total_players: int = Field(description="Players with at least one kill with it, before `limit`.")
+    players: list[WeaponPlayer] = Field(description="Most kills first.")
+
+
+class WeaponRankingsOut(BaseModel):
+    scope: InsightScope
+    weapons: list[WeaponRanking] = Field(description="Most kills first.")
+
+
 class PlayerProfileOut(BaseModel):
     player: InsightPlayer
     names: list[str] = Field(default_factory=list)
