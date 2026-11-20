@@ -11,7 +11,15 @@ from pathlib import Path
 import pytest
 
 from demoreel.analysis.schema import MatchAnalysis
-from demoreel.render.base import Clip, ClipSegment, RenderCancelled, RenderError, RenderJob, RenderOptions
+from demoreel.render.base import (
+    Clip,
+    ClipSegment,
+    RecorderBusy,
+    RenderCancelled,
+    RenderError,
+    RenderJob,
+    RenderOptions,
+)
 from demoreel.render.ingame import IngameRenderer, encode, launcher, plugin
 from demoreel.render.ingame.settings import IngameSettings
 
@@ -351,10 +359,38 @@ def test_render_fails_fast_when_another_recording_holds_the_lock(env):
     game = FakeGame(settings)
     job = make_job(demo, tmp_path, [Clip(segments=[ClipSegment(8000, 8032, STEAM_A)])])
     job.options.extra["ingame_lock_wait_s"] = 0
-    with launcher.recording_lock(settings.lock_path):
+    renderer = renderer_for(settings, game)
+    other = launcher.RecordingLock(settings.lock_path)  # another process recording
+    assert other.try_acquire() and renderer.recorder_taken()
+    try:
         with pytest.raises(RenderError, match="Another in-game recording"):
-            renderer_for(settings, game).render(job)
-    assert game.calls == []
+            renderer.render(job)
+        with pytest.raises(RecorderBusy), renderer.recorder():
+            pass
+    finally:
+        other.release()
+    assert game.calls == [] and not renderer.recorder_taken()
+
+
+def test_a_job_keeps_the_recorder_between_its_renders(env):
+    settings, demo, tmp_path = env
+    add_plugin(settings)
+    game = FakeGame(settings)
+    renderer = renderer_for(settings, game)
+    probe = launcher.RecordingLock(settings.lock_path)
+    with renderer.recorder():
+        for n in range(2):  # two game sessions of one match (normal speed, then slow motion)
+            job = make_job(demo, tmp_path / f"s{n}", [Clip(segments=[ClipSegment(8000, 8032, STEAM_A)])])
+            job.options.extra["ingame_lock_wait_s"] = 0
+            renderer.render(job)
+            assert probe.is_held_elsewhere()  # nobody else could have started the game in between
+    assert len(game.calls) == 2 and not probe.is_held_elsewhere()
+
+
+def test_the_lock_asked_about_without_detection_is_the_one_recordings_take(tmp_path):
+    from demoreel.render.ingame import settings as ingame_settings
+
+    assert ingame_settings.load().lock_path == ingame_settings.default_lock_path()
 
 
 def test_render_propagates_cancellation_and_cleans_up(env):

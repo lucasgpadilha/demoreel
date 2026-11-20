@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import shutil
 import time
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -17,11 +19,59 @@ from .compose.pipeline import finish
 from .config import get_settings
 from .db import Highlight, session_scope
 from .render import Clip, ClipSegment, RenderJob, RenderOptions, get_renderer
-from .render.base import RenderCancelled, RenderError
+from .render.base import RecorderBusy, RenderCancelled, RenderError
 from .schemas import RenderOptionsIn
 from .webhooks import emit
 
 log = logging.getLogger("demoreel.tasks")
+
+WAITING_FOR_GAME = "Waiting for another in-game recording to finish"
+
+
+@jobs.reserve("ingame")
+@contextmanager
+def _take_game() -> Iterator[None]:
+    """A worker takes this machine's game before it takes a recording job, and keeps it for the job. While
+    another process records, the workers here leave recording jobs in the queue, in their order, and stay
+    free for the work that needs no game (editing what was already recorded)."""
+    renderer = get_renderer("ingame")
+    hold = getattr(renderer, "recorder", None)
+    if hold is None:  # a renderer with nothing to share
+        yield
+        return
+    taken = getattr(renderer, "recorder_taken", None)
+    if taken is not None and taken():  # the usual answer while a match is being recorded, and a cheap one
+        raise jobs.Taken()
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(hold())
+        except RecorderBusy as exc:
+            raise jobs.Taken() from exc
+        yield
+
+
+@contextmanager
+def _recorder(ctx: jobs.JobContext, extra: dict) -> Iterator[None]:
+    """One turn at this machine's game for everything a job records.
+
+    When another recording has the game the job is not kept waiting on a worker (where it would give up after
+    a while, and where the order of arrival is lost): it goes back to the queue and keeps its place. A job may
+    still ask to wait a little first with ``ingame_lock_wait_s``."""
+    hold = getattr(get_renderer("ingame"), "recorder", None)
+    if hold is None:  # a renderer with nothing to share
+        yield
+        return
+    try:
+        wait_s = max(0.0, float(extra.get("ingame_lock_wait_s") or 0))
+    except (TypeError, ValueError):
+        wait_s = 0.0
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(hold(wait_s=wait_s, cancelled=ctx.cancelled,
+                                     on_wait=lambda waited: ctx.progress(0.01, WAITING_FOR_GAME)))
+        except RecorderBusy as exc:
+            raise jobs.JobDeferred(WAITING_FOR_GAME) from exc
+        yield
 
 
 def _discard(*paths: Path | None) -> None:
@@ -114,7 +164,8 @@ def _record(ctx: jobs.JobContext, *, match_id: str, demo_path: Path, analysis, c
                               fps=max(fps, settings.ingame_capture_fps), crf=17, title_cards=False, extra=extra),
         progress=lambda f, msg: ctx.progress(lo + (hi - lo) * f, msg), cancelled=ctx.cancelled)
     capture.work_dir.mkdir(parents=True, exist_ok=True)
-    res = get_renderer("ingame").render(capture)
+    with _recorder(ctx, extra):
+        res = get_renderer("ingame").render(capture)
     m = masters.save_master(match_id, capture.out_path, width=res.width, height=res.height, fps=res.fps,
                             spans=res.details["spans"], covered=covered, extra=extra)
     return m, {"captured": True, "capture_fps": res.fps, "capture_size": f"{res.width}x{res.height}",
@@ -205,25 +256,28 @@ def capture_match(ctx: jobs.JobContext) -> dict[str, Any]:
     # frames - and the time - of everything else.
     groups = masters.capture_groups(clips, settings.render_fps, settings.ingame_capture_fps)
     details: dict[str, Any] = {}
+    extra = dict(ctx.payload.get("extra") or {})
     try:
-        ctx.progress(0.01, f"Recording {len(clips)} plays with the game")
-        done = 0
-        for fps, group in groups.items():
-            lo = 0.02 + 0.95 * done / max(1, len(clips))
-            done += len(group)
-            hi = 0.02 + 0.95 * done / max(1, len(clips))
-            sub = work_dir / f"fps{fps}"
-            sub.mkdir(parents=True, exist_ok=True)
-            _master, d = _record(ctx, match_id=match_id, demo_path=demo_path, analysis=analysis, clips=group,
-                                 fps=fps, extra=dict(ctx.payload.get("extra") or {}), work_dir=sub, span=(lo, hi))
-            if not details:
-                details = {**d, "sessions": 1}
-            else:
-                for key in ("takes", "frames", "game_seconds"):
-                    details[key] = (details.get(key) or 0) + (d.get(key) or 0)
-                details["warnings"] = [*(details.get("warnings") or []), *(d.get("warnings") or [])]
-                details["sessions"] += 1
-                details["capture_fps"] = max(details["capture_fps"], d["capture_fps"])
+        # The whole match is one turn at the game: no other recording gets in between its sessions.
+        with _recorder(ctx, extra):
+            ctx.progress(0.01, f"Recording {len(clips)} plays with the game")
+            done = 0
+            for fps, group in groups.items():
+                lo = 0.02 + 0.95 * done / max(1, len(clips))
+                done += len(group)
+                hi = 0.02 + 0.95 * done / max(1, len(clips))
+                sub = work_dir / f"fps{fps}"
+                sub.mkdir(parents=True, exist_ok=True)
+                _master, d = _record(ctx, match_id=match_id, demo_path=demo_path, analysis=analysis, clips=group,
+                                     fps=fps, extra=dict(extra), work_dir=sub, span=(lo, hi))
+                if not details:
+                    details = {**d, "sessions": 1}
+                else:
+                    for key in ("takes", "frames", "game_seconds"):
+                        details[key] = (details.get(key) or 0) + (d.get(key) or 0)
+                    details["warnings"] = [*(details.get("warnings") or []), *(d.get("warnings") or [])]
+                    details["sessions"] += 1
+                    details["capture_fps"] = max(details["capture_fps"], d["capture_fps"])
     except RenderCancelled as exc:  # cancelled while the game was recording: a cancellation, not a failure
         raise jobs.JobCancelled() from exc
     finally:
@@ -307,6 +361,8 @@ def render(ctx: jobs.JobContext) -> dict[str, Any]:
     except (jobs.JobCancelled, RenderCancelled) as exc:
         _discard(final_path, job.thumbnail_path)
         raise jobs.JobCancelled() from exc
+    except jobs.JobDeferred:  # the game is taken: nothing was made and nothing failed
+        raise
     except Exception as exc:
         _discard(final_path)
         emit("render.failed", {"render_id": render_id, "error": str(exc)})

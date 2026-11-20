@@ -86,7 +86,7 @@ Passed in the render request's `options.extra` (all optional):
 | `ingame_launch_args` | extra CS2 launch options (`-insecure` cannot be removed) | none |
 | `ingame_keep_raw` | keep the TGA/WAV files in the game folder (debugging) | `false` |
 | `ingame_swap_red_blue` | swap red and blue while encoding | Linux without the Vulkan layer |
-| `ingame_lock_wait_s` | how long to wait for another recording to finish | 1800 |
+| `ingame_lock_wait_s` | how long to wait for another recording to finish. A queued job that is still waiting after that goes back to the queue, in its place; it does not fail | 0 for queued jobs, 1800 for a direct render |
 | `ingame_startup_timeout_s` / `ingame_stall_timeout_s` | give up when no frame / no new frame shows up for this long | 300 / 300 |
 
 `width`, `height`, `fps` and `crf` come from the normal render options; the game window is opened at
@@ -156,9 +156,13 @@ Files demoreel touches inside the CS2 folder, all removed/restored afterwards: `
   error dialog, or silently not load (symptom: "CS2 wrote no frames" / "No csdm.log was written"). Wait for
   CS Demo Manager to publish new binaries and replace the file. Old demos often cannot be played by a newer
   CS2 at all; the render result carries a warning when the demo's patch differs from the installed one.
-- **One instance at a time.** A lock file (`<data_dir>/ingame/recording.lock`) serializes recordings; a second
-  job waits (30 min by default). If CS2 is already open - your own game - the render is refused: demoreel never
-  kills a game it did not start.
+- **One instance at a time.** A lock file (`<data_dir>/ingame/recording.lock`) serializes recordings. Queued
+  jobs do not wait for it on a worker: a worker takes the lock before it takes a recording job, so while the
+  game is recording the other workers of that machine leave those jobs in the queue - they run in the order
+  they arrived, however many there are - and edit what is already recorded meanwhile. A match is one turn at the game, even when it needs two sessions (normal
+  speed, then slow motion). Only a direct render (`demoreel render --renderer ingame`) waits, 30 min by
+  default. If CS2 is already open - your own game - the render is refused: demoreel never kills a game it did
+  not start.
 - **Machines that host game servers.** A dedicated server (`cs2 -dedicated`) is a process with the same name
   as the game. demoreel tells them apart by the command line: servers do not count as "CS2 is already
   running", and when a recording is cancelled or times out only the game it started is closed - never a

@@ -36,7 +36,7 @@ from . import jobs, service
 from .analysis.schema import MatchAnalysis
 from .brand import brand_for
 from .config import get_settings
-from .db import Highlight, Job, Match, Render, Worker, WorkerMaster, now, session_scope
+from .db import Highlight, Job, Render, Worker, WorkerMaster, now, session_scope
 from .schemas import JobOut, WorkerFinish, WorkerOut
 from .webhooks import emit
 
@@ -126,8 +126,7 @@ def remove_worker(s: Session, name_or_id: str) -> str:
                        "play will be recorded once more by a worker that has the game.")
             jobs._mark_target_failed(s, j, j.error)
         else:
-            j.status, j.worker_id, j.message = "queued", None, f"Re-queued: worker {name} was removed"
-            _unstart(s, j)
+            jobs.give_back(s, j, f"Re-queued: worker {name} was removed", counts=True)
     s.execute(delete(WorkerMaster).where(WorkerMaster.worker_id == w.id))
     s.delete(w)
     return name
@@ -209,18 +208,6 @@ def sync_masters(s: Session, worker: Worker, items: list[dict[str, Any]], *, rep
 
 def _job_owner(worker_id: str) -> str:
     return f"remote:{worker_id}"
-
-
-def _unstart(s: Session, job: Job) -> None:
-    """Undo what taking the job marked on the thing it makes (the job itself is already back in the queue)."""
-    if job.type == "analyze_match" and job.match_id:
-        m = s.get(Match, job.match_id)
-        if m is not None and m.status == "analyzing":
-            m.status = "queued"
-    if job.render_id:
-        r = s.get(Render, job.render_id)
-        if r is not None and r.status == "running":
-            r.status = "queued"
 
 
 def _clips(s: Session, highlight_ids: list[str]) -> list[dict[str, Any]]:
@@ -558,11 +545,9 @@ def finish(worker_id: str, job_id: str, body: WorkerFinish) -> JobOut:
         if status == "failed" and body.retry and job.attempts < jobs.MAX_ATTEMPTS:
             status = "released"
         if status == "released":
-            job.status, job.worker_id, job.progress = "queued", None, 0.0
-            job.message = f"Given back by {worker.name}" + (f": {error[:160]}" if error else "")
-            if body.status == "released":
-                job.attempts = max(0, job.attempts - 1)  # the work never started: not an attempt
-            _unstart(s, job)
+            # "released": the work never started, so it is not one of the job's attempts
+            jobs.give_back(s, job, f"Given back by {worker.name}" + (f": {error[:160]}" if error else ""),
+                           counts=body.status != "released")
             shutil.rmtree(_upload_dir(job_id), ignore_errors=True)
             return service.job_out(job)
         if status == "succeeded":

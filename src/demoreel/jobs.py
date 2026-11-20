@@ -16,6 +16,7 @@ import socket
 import time
 import traceback
 from collections.abc import Callable
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -34,6 +35,11 @@ TERMINAL = {"succeeded", "failed", "canceled"}
 
 class JobCancelled(Exception):
     pass
+
+
+class JobDeferred(Exception):
+    """Raised by a handler that cannot run its job on this machine right now (the game is recording something
+    else). The job goes back to the queue and keeps its place; it is neither a failure nor an attempt."""
 
 
 @dataclass
@@ -71,6 +77,41 @@ def handler(job_type: str) -> Callable[[Handler], Handler]:
         HANDLERS[job_type] = fn
         return fn
     return deco
+
+
+class Taken(Exception):
+    """What jobs of a capability need for themselves on this machine is in use right now."""
+
+
+Reserve = Callable[[], AbstractContextManager[Any]]
+RESERVE: dict[str, Reserve] = {}
+
+
+def reserve(capability: str) -> Callable[[Reserve], Reserve]:
+    """Register how this machine takes what jobs of ``capability`` need for themselves - the game, for
+    recording. The function returns a context manager and raises :class:`Taken` when someone else has it.
+
+    A worker takes it *before* it looks at the queue and keeps it while the job runs. So only the worker that
+    has the game takes a recording job: the others leave those jobs in the queue, where they stay in the order
+    they arrived, and do other work meanwhile."""
+    def deco(fn: Reserve) -> Reserve:
+        RESERVE[capability] = fn
+        return fn
+    return deco
+
+
+def _reserved(capabilities: list[str], held: ExitStack) -> list[str]:
+    """The capabilities this worker may take a job of right now; what they need is held in ``held``."""
+    out = []
+    for capability in capabilities:
+        take = RESERVE.get(capability)
+        if take is not None:
+            try:
+                held.enter_context(take())
+            except Taken:
+                continue
+        out.append(capability)
+    return out
 
 
 def enqueue(s: Session, job_type: str, payload: dict[str, Any], *, capability: str = "cpu", priority: int = 100,
@@ -115,6 +156,36 @@ def requeue_stale() -> int:
     return n
 
 
+def give_back(s: Session, job: Job, message: str, *, counts: bool = False) -> None:
+    """Put a job a worker holds back in the queue. It keeps its age, so it is the next of its priority again.
+    ``counts``: the work did start, so this was one of the job's attempts."""
+    from .db import Match, Render
+
+    job.status, job.worker_id, job.progress, job.message = "queued", None, 0.0, message[:255] or None
+    if not counts:
+        job.attempts = max(0, job.attempts - 1)
+    # Undo what taking the job marked on the thing it makes.
+    if job.type == "analyze_match" and job.match_id:
+        m = s.get(Match, job.match_id)
+        if m is not None and m.status == "analyzing":
+            m.status = "queued"
+    if job.render_id:
+        r = s.get(Render, job.render_id)
+        if r is not None and r.status == "running":
+            r.status = "queued"
+
+
+def _defer(job_id: str, message: str) -> bool:
+    """Give a deferred job back. ``False`` when it was cancelled meanwhile (it must end as canceled instead)."""
+    with session_scope() as s:
+        row = s.get(Job, job_id)
+        if row is None or row.status != "running" or row.cancel_requested:
+            return False
+        give_back(s, row, message or "Waiting for its turn")
+    log.info("job %s back in the queue: %s", job_id, message)
+    return True
+
+
 def _mark_target_failed(s: Session, job: Job, error: str) -> None:
     from .db import Match, Render
 
@@ -156,9 +227,18 @@ def claim(worker_id: str, capabilities: list[str], *, target: str | None = None,
 
 
 def run_one(worker_id: str, capabilities: list[str]) -> bool:
-    job = claim(worker_id, capabilities)
-    if job is None:
-        return False
+    """Run the next job this worker can take. ``False`` when there was nothing to do right now."""
+    with ExitStack() as held:
+        usable = _reserved(capabilities, held)
+        job = claim(worker_id, usable) if usable else None
+        if job is None:
+            return False
+        if job.capability not in RESERVE:
+            held.close()  # this job needs nothing for itself: let go before the work, not after it
+        return _run(job)
+
+
+def _run(job: Job) -> bool:
     log.info("job %s (%s) started", job.id, job.type)
     ctx = JobContext(job_id=job.id, payload=dict(job.payload or {}))
     status, result, error = "succeeded", None, None
@@ -168,6 +248,10 @@ def run_one(worker_id: str, capabilities: list[str]) -> bool:
             raise RuntimeError(f"No handler for job type {job.type!r}")
         result = fn(ctx)
     except JobCancelled:
+        status, error = "canceled", "Canceled"
+    except JobDeferred as exc:
+        if _defer(job.id, str(exc)):
+            return False  # nothing ran: the caller waits a moment before looking at the queue again
         status, error = "canceled", "Canceled"
     except Exception as exc:  # noqa: BLE001 - job boundary: record and keep the worker alive
         status, error = "failed", f"{type(exc).__name__}: {exc}"

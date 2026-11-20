@@ -4,12 +4,13 @@ watchdog tests babysit a short-lived Python child process instead."""
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from demoreel.render.base import RenderCancelled, RenderError
+from demoreel.render.base import RecorderBusy, RenderCancelled, RenderError
 from demoreel.render.ingame import launcher, procs, staging
 from demoreel.render.ingame.settings import IngameSettings
 
@@ -114,17 +115,54 @@ def test_only_one_recording_lock_can_be_held(tmp_path):
 
 def test_recording_lock_context_fails_fast_waits_and_honours_cancel(tmp_path):
     path = tmp_path / "recording.lock"
-    with launcher.recording_lock(path):
-        with pytest.raises(RenderError, match="Another in-game recording"):
+    other = launcher.RecordingLock(path)  # what another process recording looks like from here
+    assert other.try_acquire()
+    try:
+        with pytest.raises(RecorderBusy, match="Another in-game recording") as busy:
             with launcher.recording_lock(path, wait_s=0):
                 pass
+        assert isinstance(busy.value, RenderError)  # still the error a direct render reports
         waits: list[float] = []
         with pytest.raises(RenderCancelled):
             with launcher.recording_lock(path, wait_s=30, cancelled=lambda: len(waits) >= 2,
                                          on_wait=waits.append, poll_s=0.01):
                 pass
         assert len(waits) == 2
+    finally:
+        other.release()
     with launcher.recording_lock(path, wait_s=0):  # released: can be taken again
+        pass
+
+
+def test_whoever_holds_the_recording_lock_enters_again_and_keeps_it_until_the_outer_use_ends(tmp_path):
+    path = tmp_path / "recording.lock"
+    probe = launcher.RecordingLock(path)
+    with launcher.recording_lock(path) as outer:
+        with launcher.recording_lock(path, wait_s=0) as inner:  # a job recording twice in a row
+            assert inner is outer
+        assert probe.is_held_elsewhere()  # leaving the inner use did not let go of the game
+        seen = []
+        thread = threading.Thread(target=lambda: seen.append(_enters(path)))  # another thread is someone else
+        thread.start()
+        thread.join()
+        assert seen == [False]
+    assert not probe.is_held_elsewhere()
+
+
+def _enters(path) -> bool:
+    try:
+        with launcher.recording_lock(path, wait_s=0):
+            return True
+    except RecorderBusy:
+        return False
+
+
+def test_a_probe_passing_by_is_not_taken_for_a_recording(tmp_path):
+    path = tmp_path / "recording.lock"
+    passing = launcher.RecordingLock(path)
+    assert passing.try_acquire()
+    threading.Timer(0.08, passing.release).start()  # an idle worker asking "is it taken?" lets go at once
+    with launcher.recording_lock(path, wait_s=0):
         pass
 
 
