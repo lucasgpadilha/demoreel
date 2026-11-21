@@ -133,6 +133,8 @@ class Scope:
     until: datetime | None = None  # played before
     match_id: str | None = None
     night: date | None = None  # the evening the night started, local time (see ``night_of``)
+    # match ids left out whatever the other filters say (a site that hid a match keeps it out of every number)
+    exclude: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -189,9 +191,10 @@ def _slim_analysis(path: str, mtime: float) -> MatchAnalysis:
     return a
 
 
-def _ready_matches(s: Session) -> list[tuple[Match, datetime]]:
+def _ready_matches(s: Session, exclude: frozenset[str] = frozenset()) -> list[tuple[Match, datetime]]:
     rows = s.scalars(select(Match).where(Match.status == "ready", Match.analysis_path.isnot(None))).all()
-    return sorted(((m, _utc(m.played_at or m.created_at)) for m in rows), key=lambda x: (x[1], x[0].id))
+    return sorted(((m, _utc(m.played_at or m.created_at)) for m in rows if m.id not in exclude),
+                  key=lambda x: (x[1], x[0].id))
 
 
 def _in_window(when: datetime, scope: Scope) -> bool:
@@ -204,11 +207,14 @@ def load_entries(s: Session, scope: Scope | None = None) -> list[Entry]:
     a ``since``/``until`` window may simply be empty."""
     scope = scope or Scope()
     if scope.match_id is not None:
+        if scope.match_id in scope.exclude:
+            raise service.ServiceError(f"Match {scope.match_id!r} is both asked for (match_id) and left out "
+                                       "(exclude). Drop it from one of the two.")
         m = service.get_match(s, scope.match_id)
         service.load_analysis(m)  # raises the "not analyzed yet" conflict
         rows = [(m, _utc(m.played_at or m.created_at))]
     else:
-        rows = _ready_matches(s)
+        rows = _ready_matches(s, scope.exclude)
     tz = local_zone()
     out: list[Entry] = []
     for m, when in rows:
@@ -224,7 +230,7 @@ def load_entries(s: Session, scope: Scope | None = None) -> list[Entry]:
         raise service.ServiceError(f"Match {scope.match_id!r} is outside the requested night / since / until "
                                    "window. Drop those filters to use the match.")
     if not out and scope.night is not None:
-        known = sorted({night_of(when, tz) for _m, when in _ready_matches(s) if _in_window(when, scope)}, reverse=True)
+        known = sorted({night_of(when, tz) for _m, when in _ready_matches(s, scope.exclude) if _in_window(when, scope)}, reverse=True)
         raise service.NotFound(f"No analyzed match was played on the night of {scope.night.isoformat()}. "
                                + (f"Nights with matches: {', '.join(d.isoformat() for d in known[:30])}."
                                   if known else "There are no analyzed matches yet."))
@@ -234,7 +240,7 @@ def load_entries(s: Session, scope: Scope | None = None) -> list[Entry]:
 def _scope_out(entries: list[Entry], scope: Scope | None) -> InsightScope:
     scope = scope or Scope()
     return InsightScope(since=scope.since, until=scope.until, match_id=scope.match_id,
-                        night=scope.night.isoformat() if scope.night else None,
+                        night=scope.night.isoformat() if scope.night else None, excluded=sorted(scope.exclude),
                         matches=[e.match_id for e in entries],
                         nights=sorted({e.night.isoformat() for e in entries}),
                         rounds=sum(len(e.analysis.rounds) for e in entries))
@@ -1015,7 +1021,7 @@ def trophies(s: Session, scope: Scope | None = None) -> TrophiesOut:
     scope = scope or Scope()
     if scope.match_id is None and scope.night is None:
         tz = local_zone()
-        found = [night_of(when, tz) for _m, when in _ready_matches(s) if _in_window(when, scope)]
+        found = [night_of(when, tz) for _m, when in _ready_matches(s, scope.exclude) if _in_window(when, scope)]
         if not found:
             raise service.NotFound("There are no analyzed matches to give trophies for. Trophies are for one "
                                    "match (match_id) or one night (night=YYYY-MM-DD).")

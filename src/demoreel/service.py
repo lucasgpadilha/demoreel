@@ -14,6 +14,7 @@ import logging
 import shutil
 import time
 import zipfile
+from collections.abc import Iterable
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -884,9 +885,11 @@ def brand_out(brand=None) -> BrandOut:
 
 def feed(s: Session, *, limit: int = 24, player_steamid: str | None = None, kind: str | None = None,
          featured: bool | None = None, since: datetime | None = None, until: datetime | None = None,
-         offset: int = 0, total: list[int] | None = None, category: str | None = "play") -> list[FeedItem]:
+         offset: int = 0, total: list[int] | None = None, category: str | None = "play",
+         exclude: Iterable[str] = ()) -> list[FeedItem]:
     """The best plays that already have a video, across every match. In-game footage wins over the 2D replay
-    when a play has both; among equals the newest video is shown."""
+    when a play has both; among equals the newest video is shown. ``exclude`` leaves out the plays of those
+    matches (a site that hid a match keeps its clips out of the feed)."""
     def rank(r: Render) -> tuple[int, int]:  # POV before 2D, landscape before vertical (a feed poster is 16:9)
         return (0 if r.renderer == "ingame" else 1, 0 if format_of(r.width, r.height, r.options) == "16:9" else 1)
 
@@ -910,6 +913,9 @@ def feed(s: Session, *, limit: int = 24, player_steamid: str | None = None, kind
         q = q.where(Highlight.player_steamid == player_steamid)
     if kind:
         q = q.where(Highlight.kind == kind)
+    left_out = sorted(set(exclude))
+    if left_out:
+        q = q.where(Highlight.match_id.notin_(left_out))
     if since is not None or until is not None:  # by when the match was played (or uploaded, if unknown)
         when = func.coalesce(Match.played_at, Match.created_at)
         q = q.join(Match, Match.id == Highlight.match_id)
