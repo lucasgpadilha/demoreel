@@ -201,6 +201,9 @@ from the stored analyses, so it covers every match in the database. REST: `GET /
   its upload time when the source gave no date), `night=YYYY-MM-DD`, `match_id`. No filter = every analyzed
   match. An unknown match or a night without matches is an error that lists the valid nights; an empty
   `since`/`until` window is just empty.
+- `exclude` (repeatable: `exclude=m_1&exclude=m_2`; `exclude` in the MCP tools) leaves matches out whatever the
+  other filters say. It is how a community site that hides a match on its own pages keeps it out of every
+  number here too. An unknown id is ignored; asking for a match with `match_id` and excluding it is an error.
 - A **night** is every match played from noon to noon, local time: the night of a match is the local date
   twelve hours before it was played, so a game at 02:00 on Saturday belongs to Friday. Local time is
   `DEMOREEL_TIMEZONE` (an IANA name such as `America/Sao_Paulo`), else the server's time zone.

@@ -448,6 +448,29 @@ def test_scopes_pick_matches_by_night_window_and_id(season):
         assert "outside" in err.value.message
 
 
+def test_excluded_matches_are_out_of_every_scope(season):
+    m1, m2, m3 = season
+    sem_m2 = frozenset({m2, "m_que_nao_existe"})  # an unknown id is ignored
+    with session_scope() as s:
+        march = insights.Scope(since=MARCH.since, until=MARCH.until, exclude=sem_m2)
+        assert [e.match_id for e in insights.load_entries(s, march)] == [m1, m3]
+        assert [e.match_id for e in insights.load_entries(s, insights.Scope(night=date(2021, 3, 5), exclude=sem_m2))] == [m1]
+        assert [(n.date, n.matches) for n in insights.nights(s, march)] == [("2021-03-12", [m3]), ("2021-03-05", [m1])]
+        tudo = insights.rivalries(s, MARCH, min_duels=1, limit=200)
+        sem = insights.rivalries(s, march, min_duels=1, limit=200)
+        assert sem.scope.matches == [m1, m3] and sem.scope.excluded == sorted(sem_m2)
+        assert sum(p.duels for p in sem.pairs) < sum(p.duels for p in tudo.pairs)
+        # a night left with no match is the usual "no match that night" error, without the excluded night
+        with pytest.raises(service.NotFound) as err:
+            insights.load_entries(s, insights.Scope(night=date(2021, 3, 12), exclude=frozenset({m3})))
+        assert "2021-03-12." in err.value.message and "Nights with matches: 2021-03-05" in err.value.message
+        # the latest night for the trophies is the latest one that still has a match
+        assert insights.trophies(s, insights.Scope(exclude=frozenset({m3}))).scope.night == "2021-03-05"
+        with pytest.raises(service.ServiceError) as err:
+            insights.load_entries(s, insights.Scope(match_id=m1, exclude=frozenset({m1})))
+        assert "exclude" in err.value.message
+
+
 def test_trophies_default_to_the_latest_night(season):
     with session_scope() as s:
         out = insights.trophies(s, insights.Scope(until=MARCH.until))
@@ -526,6 +549,18 @@ def test_insight_endpoint_errors_say_what_is_valid(client, season):
     assert client.get("/api/v1/insights/rivalries", params={"until": "2020-01-01T00:00:00Z"}).json()["pairs"] == []
 
 
+def test_insight_endpoints_leave_excluded_matches_out(client, season):
+    m1, m2, m3 = season
+    nights = client.get("/api/v1/insights/nights", params={**WINDOW, "exclude": [m2, m3]}).json()
+    assert [(n["date"], n["matches"]) for n in nights] == [("2021-03-05", [m1])]
+    guns = client.get("/api/v1/insights/weapons", params={"night": "2021-03-05", "exclude": m2}).json()
+    assert guns["scope"]["matches"] == [m1] and guns["scope"]["excluded"] == [m2]
+    riv = client.get("/api/v1/insights/rivalries", params={**WINDOW, "exclude": [m1, m2, m3]}).json()
+    assert riv["pairs"] == [] and riv["scope"]["matches"] == []
+    r = client.get("/api/v1/insights/trophies", params={"match_id": m1, "exclude": m1})
+    assert r.status_code == 400 and "exclude" in r.json()["detail"]
+
+
 def test_mcp_tools_mirror_the_service(season):
     from mcp.server.mcpserver.exceptions import ToolError
 
@@ -542,6 +577,8 @@ def test_mcp_tools_mirror_the_service(season):
     assert {"list_nights", "get_rivalries", "get_player_profile", "get_trophies", "get_chat_rankings",
             "get_weapon_rankings"} <= names
     assert any(n["date"] == "2021-03-05" and n["matches"] == season[:2] for n in call("list_nights"))
+    assert any(n["date"] == "2021-03-05" and n["matches"] == season[:1] for n in call("list_nights", exclude=[season[1]]))
+    assert call("get_weapon_rankings", night="2021-03-05", exclude=[season[1]])["scope"]["matches"] == 1
 
     riv = call("get_rivalries", player="CT1", night="2021-03-05")  # by name
     assert riv["pairs"][0]["score"] == "6-2" and riv["players"][0]["victim"] == "T1 (6-2)" and riv["scope"]["matches"] == 2

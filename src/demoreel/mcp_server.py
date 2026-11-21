@@ -115,6 +115,8 @@ Night = Annotated[str | None, Field(description="One night, YYYY-MM-DD (the even
                                                 "midnight belong to the night before). See list_nights.")]
 Since = Annotated[str | None, Field(description="Only matches played at or after this ISO 8601 moment.")]
 Until = Annotated[str | None, Field(description="Only matches played before this ISO 8601 moment.")]
+Exclude = Annotated[list[str] | None, Field(description="Match ids to leave out, whatever the other filters "
+                                                       "say (e.g. matches hidden on the community's site).")]
 
 
 def build_server() -> MCPServer:
@@ -403,7 +405,7 @@ def build_server() -> MCPServer:
         "or 'what did <player> do lately' without walking every match."))
     @_threaded
     def get_feed(limit: Annotated[int, Field(ge=1, le=100)] = 12, player: str | None = None,
-                 kind: str | None = None) -> list[dict[str, Any]]:
+                 kind: str | None = None, exclude: Exclude = None) -> list[dict[str, Any]]:
         with session_scope() as s:
             sid = player
             if player and not player.isdigit():  # a name: look it up in the most recent matches
@@ -414,7 +416,7 @@ def build_server() -> MCPServer:
                     except service.ServiceError:
                         continue
             out = []
-            for i in service.feed(s, limit=limit, player_steamid=sid, kind=kind):
+            for i in service.feed(s, limit=limit, player_steamid=sid, kind=kind, exclude=exclude or ()):
                 out.append({"highlight_id": i.highlight.id, "title": i.highlight.title, "kind": i.highlight.kind,
                             "player": i.highlight.player.name, "round": i.highlight.round, "score": i.highlight.score,
                             "tags": i.highlight.tags, "duration_s": i.render.duration_s, "match_id": i.match.id,
@@ -513,13 +515,15 @@ def build_server() -> MCPServer:
                 "upload_endpoint": f"{s.base_url}/api/v1/matches", "import_dirs": [str(d) for d in s.import_dirs]}
 
     # ------------------------------------------------------------------ insights across matches
-    def _scope(night: str | None, match_id: str | None, since: str | None, until: str | None) -> insights.Scope:
+    def _scope(night: str | None, match_id: str | None, since: str | None, until: str | None,
+               exclude: list[str] | None = None) -> insights.Scope:
         from datetime import date, datetime
 
         try:
             return insights.Scope(night=date.fromisoformat(night) if night else None, match_id=match_id or None,
                                   since=datetime.fromisoformat(since) if since else None,
-                                  until=datetime.fromisoformat(until) if until else None)
+                                  until=datetime.fromisoformat(until) if until else None,
+                                  exclude=frozenset(exclude or ()))
         except ValueError as exc:
             raise service.ServiceError(f"Bad date ({exc}). night is YYYY-MM-DD; since / until are ISO 8601, "
                                        "e.g. 2026-11-13T18:00:00-03:00.") from exc
@@ -536,9 +540,10 @@ def build_server() -> MCPServer:
         "match from noon to noon, so games after midnight count for the evening before. Use the date as "
         "`night` in get_trophies / get_rivalries / get_chat_rankings / get_player_profile."))
     @_threaded
-    def list_nights() -> list[dict[str, Any]]:
+    def list_nights(exclude: Exclude = None) -> list[dict[str, Any]]:
         with session_scope() as s:
-            return [n.model_dump(mode="json", exclude={"first_played_at", "last_played_at"}) for n in insights.nights(s)]
+            return [n.model_dump(mode="json", exclude={"first_played_at", "last_played_at"})
+                    for n in insights.nights(s, _scope(None, None, None, None, exclude))]
 
     @mcp.tool(annotations=READ, description=(
         "Who kills whom across matches. `pairs`: two players, kills of each on the other (`score`, the one "
@@ -552,8 +557,8 @@ def build_server() -> MCPServer:
                       min_duels: Annotated[int | None, Field(ge=1, description="Leave out pairs with fewer kills "
                                                              "between them (default: 2 per match, 3 to 10).")] = None,
                       sort: Literal["duels", "diff", "imbalance"] = "duels",
-                      limit: Annotated[int, Field(ge=1, le=200)] = 15) -> dict[str, Any]:
-        scope = _scope(night, match_id, since, until)
+                      limit: Annotated[int, Field(ge=1, le=200)] = 15, exclude: Exclude = None) -> dict[str, Any]:
+        scope = _scope(night, match_id, since, until, exclude)
         with session_scope() as s:
             sid = insights.resolve_player(s, player, scope) if player else None
             out = insights.rivalries(s, scope, sid, min_duels, sort=sort, limit=limit)
@@ -574,8 +579,8 @@ def build_server() -> MCPServer:
     @_threaded
     def get_player_profile(player: Annotated[str, Field(description="SteamID or player name.")],
                            night: Night = None, match_id: str | None = None, since: Since = None,
-                           until: Until = None) -> dict[str, Any]:
-        scope = _scope(night, match_id, since, until)
+                           until: Until = None, exclude: Exclude = None) -> dict[str, Any]:
+        scope = _scope(night, match_id, since, until, exclude)
         with session_scope() as s:
             out = insights.player_profile(s, insights.resolve_player(s, player, scope), scope)
         data = out.model_dump(mode="json", exclude_none=True, exclude={"scope"})
@@ -592,10 +597,10 @@ def build_server() -> MCPServer:
                                                                                "name. Default: all.")] = None,
                             night: Night = None, match_id: str | None = None, since: Since = None,
                             until: Until = None,
-                            limit: Annotated[int, Field(ge=1, le=100, description="Players per weapon.")] = 5
-                            ) -> dict[str, Any]:
+                            limit: Annotated[int, Field(ge=1, le=100, description="Players per weapon.")] = 5,
+                            exclude: Exclude = None) -> dict[str, Any]:
         with session_scope() as s:
-            out = insights.weapon_rankings(s, _scope(night, match_id, since, until), weapon, limit)
+            out = insights.weapon_rankings(s, _scope(night, match_id, since, until, exclude), weapon, limit)
         return {"scope": _scope_brief(out.scope),
                 "weapons": [{"weapon": w.weapon, "kills": w.kills, "headshot_pct": w.headshot_pct,
                              "total_players": w.total_players,
@@ -610,9 +615,9 @@ def build_server() -> MCPServer:
         "Each has titles in Portuguese and English, the winner, the value, the numbers behind it and the "
         "runners-up; a trophy nobody deserved is left out."))
     @_threaded
-    def get_trophies(night: Night = None, match_id: str | None = None) -> dict[str, Any]:
+    def get_trophies(night: Night = None, match_id: str | None = None, exclude: Exclude = None) -> dict[str, Any]:
         with session_scope() as s:
-            out = insights.trophies(s, _scope(night, match_id, None, None))
+            out = insights.trophies(s, _scope(night, match_id, None, None, exclude))
         return {"kind": out.kind, "night": out.scope.night, "scope": _scope_brief(out.scope),
                 "trophies": [{"key": t.key, "title_pt": t.title_pt, "title_en": t.title_en, "player": t.player.name,
                               "steamid": t.player.steamid, "value": t.value, "detail": t.detail,
@@ -630,10 +635,10 @@ def build_server() -> MCPServer:
     @_threaded
     def get_chat_rankings(night: Night = None, match_id: str | None = None, since: Since = None,
                           until: Until = None,
-                          limit: Annotated[int, Field(ge=1, le=100, description="Rows of `players`.")] = 15
-                          ) -> dict[str, Any]:
+                          limit: Annotated[int, Field(ge=1, le=100, description="Rows of `players`.")] = 15,
+                          exclude: Exclude = None) -> dict[str, Any]:
         with session_scope() as s:
-            out = insights.chat_rankings(s, _scope(night, match_id, since, until))
+            out = insights.chat_rankings(s, _scope(night, match_id, since, until, exclude))
         fields = ("messages", "messages_per_round", "commands", "whine", "death_cries", "toxic", "laugh", "nice",
                   "shouting", "rounds")
         return {"scope": _scope_brief(out.scope), "messages": out.messages, "note": out.note,

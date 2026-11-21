@@ -760,6 +760,11 @@ def test_feed_can_be_cut_to_a_night_and_paged(client, match_id):
     assert ids("limit=200&offset=1") == everything[1:]
     paged = client.get("/api/v1/feed?limit=1")
     assert int(paged.headers["x-total-count"]) == len(everything) >= len(paged.json()) == 1
+    # a match the site hid: its plays leave the feed and the count (an unknown id changes nothing)
+    assert ids("limit=200&exclude=m_nope") == everything
+    hidden = client.get(f"/api/v1/feed?limit=200&exclude={match_id}&exclude=m_nope")
+    assert all(i["match"]["id"] != match_id for i in hidden.json())
+    assert int(hidden.headers["x-total-count"]) == len(hidden.json()) < len(everything)
 
 
 def test_share_page_has_a_preview_and_opens_the_app(client, match_id):
