@@ -114,6 +114,20 @@ def require_key(request: Request) -> None:
         raise HTTPException(*problem)
 
 
+def _for_visitors(obj: Any, request: Request) -> Any:
+    """The organiser gets everything; a visitor gets the same answer without the error texts of jobs, matches
+    and videos, which carry folders of this machine, worker names and the end of the game console."""
+    if is_admin(request):
+        return obj
+    if isinstance(obj, list):
+        return [_for_visitors(x, request) for x in obj]
+    if isinstance(obj, (JobOut, MatchOut, RenderOut)) and obj.error:
+        return obj.model_copy(update={"error": None})
+    if isinstance(obj, HighlightOut) and obj.renders:
+        return obj.model_copy(update={"renders": _for_visitors(obj.renders, request)})
+    return obj
+
+
 def _upload_too_large() -> str:
     mb = get_settings().max_upload_mb
     return (f"The file is larger than this server's upload limit of {mb} MB (DEMOREEL_MAX_UPLOAD_MB). Send "
@@ -140,10 +154,17 @@ class Capabilities(BaseModel):
 # ------------------------------------------------------------------------------------------- meta
 
 @api.get("/capabilities", response_model=Capabilities, tags=["meta"],
-         summary="What this server can do (renderers available, limits)")
-def capabilities() -> Capabilities:
+         summary="What this server can do (renderers available, limits)",
+         description="Why a renderer is unavailable, and its details (folders, workers), are shown to the "
+                     "organiser only.")
+def capabilities(request: Request) -> Capabilities:
     s = get_settings()
-    return Capabilities(version=__version__, renderers=service.renderers_status(), default_renderer=s.default_renderer,
+    renderers = service.renderers_status()
+    if not is_admin(request):
+        renderers = [{"name": r.get("name"), "description": r.get("description", ""), "available": r.get("available"),
+                      "reason": None if r.get("available") else "Not available on this server.", "details": {}}
+                     for r in renderers]
+    return Capabilities(version=__version__, renderers=renderers, default_renderer=s.default_renderer,
                         auto_render_top=s.auto_render_top, webhook_events=EVENTS, max_upload_mb=s.max_upload_mb)
 
 
@@ -283,16 +304,17 @@ def upload_match(
 
 
 @api.get("/matches", response_model=list[MatchOut], tags=["matches"], summary="List matches, newest first")
-def list_matches(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), status: str | None = None,
-                 map: str | None = None) -> list[MatchOut]:
+def list_matches(request: Request, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
+                 status: str | None = None, map: str | None = None) -> list[MatchOut]:
     with session_scope() as s:
-        return [service.match_out(s, m) for m in service.list_matches(s, limit=limit, offset=offset, status=status, map_name=map)]
+        return _for_visitors([service.match_out(s, m) for m in service.list_matches(
+            s, limit=limit, offset=offset, status=status, map_name=map)], request)
 
 
 @api.get("/matches/{match_id}", response_model=MatchOut, tags=["matches"], summary="Match status and summary")
-def get_match(match_id: str) -> MatchOut:
+def get_match(match_id: str, request: Request) -> MatchOut:
     with session_scope() as s:
-        return service.match_out(s, service.get_match(s, match_id))
+        return _for_visitors(service.match_out(s, service.get_match(s, match_id)), request)
 
 
 @api.delete("/matches/{match_id}", status_code=204, tags=["matches"], summary="Delete a match, its demo and videos")
@@ -395,7 +417,8 @@ def get_kills(match_id: str, attacker: str | None = Query(None, description="Att
 
 @api.get("/matches/{match_id}/highlights", response_model=list[HighlightOut], tags=["highlights"],
          summary="Highlights of a match, best first, each with its rendered videos")
-def list_highlights(match_id: str, player: str | None = Query(None, description="SteamID."), kind: str | None = None,
+def list_highlights(match_id: str, request: Request, player: str | None = Query(None, description="SteamID."),
+                    kind: str | None = None,
                     min_score: float | None = None, limit: int = Query(100, ge=1, le=500),
                     featured: bool | None = Query(None, description="true: only the featured plays (the ones that "
                                                                     "get first-person videos); false: the rest."),
@@ -405,7 +428,7 @@ def list_highlights(match_id: str, player: str | None = Query(None, description=
     with session_scope() as s:
         rows = service.list_highlights(s, match_id, player_steamid=player, kind=kind, min_score=min_score,
                                        limit=limit, featured=featured, category=category)
-        return [service.highlight_out(s, h) for h in rows]
+        return _for_visitors([service.highlight_out(s, h) for h in rows], request)
 
 
 @api.post("/matches/{match_id}/highlights", response_model=HighlightOut, status_code=201, tags=["highlights"],
@@ -416,9 +439,9 @@ def create_highlight(match_id: str, body: HighlightCreate) -> HighlightOut:
 
 
 @api.get("/highlights/{highlight_id}", response_model=HighlightOut, tags=["highlights"], summary="One highlight")
-def get_highlight(highlight_id: str) -> HighlightOut:
+def get_highlight(highlight_id: str, request: Request) -> HighlightOut:
     with session_scope() as s:
-        return service.highlight_out(s, service.get_highlight(s, highlight_id))
+        return _for_visitors(service.highlight_out(s, service.get_highlight(s, highlight_id)), request)
 
 
 @api.patch("/highlights/{highlight_id}", response_model=HighlightOut, tags=["highlights"],
@@ -491,15 +514,15 @@ def rescore_match(match_id: str) -> dict:
 
 
 @api.get("/matches/{match_id}/renders", response_model=list[RenderOut], tags=["renders"], summary="Videos of a match")
-def list_renders(match_id: str) -> list[RenderOut]:
+def list_renders(match_id: str, request: Request) -> list[RenderOut]:
     with session_scope() as s:
-        return [service.render_out(s, r) for r in service.list_renders(s, match_id)]
+        return _for_visitors([service.render_out(s, r) for r in service.list_renders(s, match_id)], request)
 
 
 @api.get("/renders/{render_id}", response_model=RenderOut, tags=["renders"], summary="Render status and video URL")
-def get_render(render_id: str) -> RenderOut:
+def get_render(render_id: str, request: Request) -> RenderOut:
     with session_scope() as s:
-        return service.render_out(s, service.get_render(s, render_id))
+        return _for_visitors(service.render_out(s, service.get_render(s, render_id)), request)
 
 
 @api.delete("/renders/{render_id}", status_code=204, tags=["renders"], summary="Delete a video (cancels it if running)")
@@ -511,23 +534,24 @@ def delete_render(render_id: str) -> None:
 # ------------------------------------------------------------------------------------------- jobs
 
 @api.get("/jobs", response_model=list[JobOut], tags=["jobs"], summary="Recent jobs")
-def list_jobs(status: str | None = None, match_id: str | None = None, limit: int = Query(50, ge=1, le=200)) -> list[JobOut]:
+def list_jobs(request: Request, status: str | None = None, match_id: str | None = None,
+              limit: int = Query(50, ge=1, le=200)) -> list[JobOut]:
     with session_scope() as s:
         q = select(Job).order_by(Job.created_at.desc()).limit(limit)
         if status:
             q = q.where(Job.status == status)
         if match_id:
             q = q.where(Job.match_id == match_id)
-        return [service.job_out(j) for j in s.scalars(q).all()]
+        return _for_visitors([service.job_out(j) for j in s.scalars(q).all()], request)
 
 
 @api.get("/jobs/{job_id}", response_model=JobOut, tags=["jobs"], summary="Job status (supports long-polling)")
-async def get_job(job_id: str, wait: float = Query(0, ge=0, le=120, description="Block up to this many seconds "
-                                                   "until the job finishes, instead of polling in a loop. The "
-                                                   "answer may come earlier when many clients are waiting: look "
-                                                   "at `done`.")) -> JobOut:
+async def get_job(job_id: str, request: Request,
+                  wait: float = Query(0, ge=0, le=120, description="Block up to this many seconds until the job "
+                                      "finishes, instead of polling in a loop. The answer may come earlier when "
+                                      "many clients are waiting: look at `done`.")) -> JobOut:
     # async: a long wait must not hold one of the threads every other route shares
-    return await service.wait_job_async(job_id, wait)
+    return _for_visitors(await service.wait_job_async(job_id, wait), request)
 
 
 @api.post("/jobs/{job_id}/cancel", response_model=JobOut, tags=["jobs"], summary="Cancel a queued or running job")

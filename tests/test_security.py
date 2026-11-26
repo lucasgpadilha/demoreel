@@ -281,6 +281,43 @@ def test_a_zip_without_a_demo_is_refused_and_removed(client):
     assert r.status_code == 400 and "no .dem" in r.json()["detail"]
 
 
+# ------------------------------------------------------------------------------------------- what visitors see
+
+def test_visitors_do_not_see_internal_error_texts(client, admin_key):
+    from demoreel import jobs
+    from demoreel.db import Job, Match, init_db, now, session_scope
+
+    secret = r"RenderError: HLAE at C:\Games\HLAE\hlae.exe failed; console: ...gpu-worker-1"
+    init_db()
+    with session_scope() as s:
+        job = jobs.enqueue(s, "test_failed", {}, capability="nobody-has-this")
+        job.status, job.error = "failed", secret
+        m = Match(sha256=f"failed-{now().timestamp()}", filename="x.dem", size_bytes=1, demo_path="demos/x.dem",
+                  status="failed", error=secret)
+        s.add(m)
+        s.flush()
+        job_id, match_id = job.id, m.id
+    try:
+        for url in (f"/api/v1/jobs/{job_id}", "/api/v1/jobs", f"/api/v1/matches/{match_id}", "/api/v1/matches"):
+            assert "HLAE" not in client.get(url).text, url
+            assert "HLAE" in client.get(url, headers=admin_key).text, url
+        assert client.get(f"/api/v1/jobs/{job_id}").json()["status"] == "failed"  # the state itself stays
+    finally:
+        with session_scope() as s:
+            s.delete(s.get(Job, job_id))
+            s.delete(s.get(Match, match_id))
+
+
+def test_visitors_see_which_renderers_exist_but_not_why_or_where(client, admin_key):
+    visitor = client.get("/api/v1/capabilities").json()["renderers"]
+    organiser = client.get("/api/v1/capabilities", headers=admin_key).json()["renderers"]
+    assert [r["name"] for r in visitor] == [r["name"] for r in organiser]
+    assert [r["available"] for r in visitor] == [r["available"] for r in organiser]
+    ingame = next(r for r in visitor if r["name"] == "ingame")
+    assert ingame["details"] == {} and "DEMOREEL_" not in (ingame["reason"] or "")
+    assert "DEMOREEL_INGAME_ENABLED" in next(r for r in organiser if r["name"] == "ingame")["reason"]
+
+
 # ------------------------------------------------------------------------------------------- headers
 
 @pytest.fixture
