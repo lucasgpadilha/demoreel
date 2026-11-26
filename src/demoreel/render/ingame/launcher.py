@@ -199,10 +199,14 @@ _HELD: dict[tuple[str, int], RecordingLock] = {}  # the locks this process holds
 PROBE_GRACE_S = 0.25
 
 
+BUSY_MESSAGE = ("Another in-game recording is running on this machine (only one CS2 instance can record at a "
+                "time). Try again when it is finished.")
+
+
 @contextmanager
 def recording_lock(path: Path, wait_s: float = 0.0, cancelled: Callable[[], bool] = lambda: False,
                    on_wait: Callable[[float], None] = lambda waited: None,
-                   poll_s: float = 1.0) -> Iterator[RecordingLock]:
+                   poll_s: float = 1.0, busy_message: str = BUSY_MESSAGE) -> Iterator[RecordingLock]:
     """Hold this machine's one-recording-at-a-time lock, waiting up to ``wait_s`` for another process to let
     go of it (:class:`RecorderBusy` after that).
 
@@ -220,8 +224,7 @@ def recording_lock(path: Path, wait_s: float = 0.0, cancelled: Callable[[], bool
         if cancelled():
             raise RenderCancelled("Render cancelled while waiting for another in-game recording.")
         if waited >= max(wait_s, PROBE_GRACE_S):
-            raise RecorderBusy("Another in-game recording is running on this machine (only one CS2 instance can "
-                               "record at a time). Try again when it is finished.")
+            raise RecorderBusy(busy_message)
         if waited < PROBE_GRACE_S:
             time.sleep(0.05)
             continue

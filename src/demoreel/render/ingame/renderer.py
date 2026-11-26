@@ -102,6 +102,7 @@ class IngameRenderer:
         self._is_cs2_running = is_cs2_running
         self._is_steam_running = is_steam_running
         self._dedicated_servers = dedicated_servers
+        self._install_lock_cache: tuple[float, Path | None] | None = None
 
     def _shared_install(self, settings: IngameSettings) -> str | None:
         """Why recording must not start when a dedicated server runs from the very folder the game is recorded
@@ -130,19 +131,51 @@ class IngameRenderer:
     def _lock_path(self) -> Path:
         return self._settings.lock_path if self._settings is not None else default_lock_path()
 
+    def _install_lock(self) -> Path | None:
+        """The lock of the CS2 install (shared by every data folder on this machine). Finding the install reads
+        the registry and Steam's library list, and idle workers ask about once a second: kept for a minute."""
+        if self._settings is not None:
+            return self._settings.install_lock_path
+        now = time.monotonic()
+        if self._install_lock_cache is None or now - self._install_lock_cache[0] > 60.0:
+            try:
+                path = load_settings().install_lock_path
+            except Exception:  # noqa: BLE001 - no install, no lock
+                path = None
+            self._install_lock_cache = (now, path)
+        return self._install_lock_cache[1]
+
     def recorder_taken(self) -> bool:
-        """Is another process recording with the game on this machine right now? Cheap; never raises."""
+        """Is another process recording with the game on this machine right now - from this data folder or
+        another one using the same CS2? Cheap; never raises."""
         try:
-            return launcher.RecordingLock(self._lock_path()).is_held_elsewhere()
+            if launcher.RecordingLock(self._lock_path()).is_held_elsewhere():
+                return True
+            install = self._install_lock()
+            return install is not None and launcher.RecordingLock(install).is_held_elsewhere()
         except Exception:  # noqa: BLE001
             return False
+
+    @contextmanager
+    def _hold(self, lock: Path, install: Path | None, wait_s: float, cancelled: Callable[[], bool],
+              on_wait: Callable[[float], None]) -> Iterator[None]:
+        """Both locks, always in this order (the data folder's, then the install's): no two processes can wait
+        on each other."""
+        with launcher.recording_lock(lock, wait_s, cancelled, on_wait):
+            if install is None:
+                yield
+                return
+            busy = ("Another demoreel, with another data folder, is recording with this CS2 install right now "
+                    "(only one recording per CS2 folder at a time). Try again when it is finished.")
+            with launcher.recording_lock(install, wait_s, cancelled, on_wait, busy_message=busy):
+                yield
 
     @contextmanager
     def recorder(self, wait_s: float = 0.0, cancelled: Callable[[], bool] = lambda: False,
                  on_wait: Callable[[float], None] = lambda waited: None) -> Iterator[None]:
         """Keep this machine's recorder for several :meth:`render` calls in a row: nothing else gets the game
         in between. Raises :class:`RecorderBusy` when another process still has it after ``wait_s``."""
-        with launcher.recording_lock(self._lock_path(), wait_s, cancelled, on_wait):
+        with self._hold(self._lock_path(), self._install_lock(), wait_s, cancelled, on_wait):
             yield
 
     # --- availability ---------------------------------------------------------------------------------
@@ -221,7 +254,9 @@ class IngameRenderer:
 
         recording = False
         try:
-            recording = launcher.RecordingLock(settings.lock_path).is_held_elsewhere()
+            recording = launcher.RecordingLock(settings.lock_path).is_held_elsewhere() or (
+                settings.install_lock_path is not None
+                and launcher.RecordingLock(settings.install_lock_path).is_held_elsewhere())
         except Exception:  # noqa: BLE001
             recording = False
         details["recording_in_progress"] = recording
@@ -256,9 +291,8 @@ class IngameRenderer:
             raise RenderError("Nothing to render: no clips.")
 
         wait_s = _number(extra, "ingame_lock_wait_s", 1800.0)
-        with launcher.recording_lock(
-                settings.lock_path, wait_s, job.cancelled,
-                on_wait=lambda waited: job.progress(0.01, "Waiting for another in-game recording to finish")):
+        with self._hold(settings.lock_path, settings.install_lock_path, wait_s, job.cancelled,
+                        on_wait=lambda waited: job.progress(0.01, "Waiting for another in-game recording to finish")):
             return self._render_locked(job, settings)
 
     @staticmethod

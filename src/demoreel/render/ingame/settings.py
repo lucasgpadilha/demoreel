@@ -13,9 +13,11 @@ Detection never raises: a missing piece is simply ``None`` and reported by ``Ing
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import sys
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -155,6 +157,11 @@ class IngameSettings:
     @property
     def lock_path(self) -> Path:
         return self.data_dir / "recording.lock"
+
+    @property
+    def install_lock_path(self) -> Path | None:
+        """This machine's lock for the CS2 install itself (see :func:`install_lock_path`); ``None`` without CS2."""
+        return install_lock_path(self.cs2_dir) if self.cs2_dir is not None else None
 
     @property
     def cfg_dir(self) -> Path:
@@ -319,6 +326,20 @@ def _default_data_dir() -> Path:
         return Path(get_settings().data_dir)
     except Exception:  # noqa: BLE001 - config unavailable (tests, partial installs)
         return Path(os.environ.get("DEMOREEL_DATA_DIR") or "data")
+
+
+def install_lock_path(cs2_dir: Path) -> Path:
+    """A lock file named after the CS2 folder, in this machine's temp folder.
+
+    ``recording.lock`` lives in the data folder, so two demoreel set-ups with different data folders (the main
+    checkout and a worktree, say) would record with the same game at once: each deletes the other's frames and
+    both patch ``gameinfo.gi``. Whoever records holds this lock too, for as long as it holds its own."""
+    try:
+        key = os.path.normcase(str(Path(cs2_dir).resolve()))
+    except OSError:
+        key = os.path.normcase(os.path.abspath(cs2_dir))
+    digest = hashlib.sha1(key.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / f"demoreel-cs2-{digest}.lock"
 
 
 def default_lock_path() -> Path:

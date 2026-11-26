@@ -160,7 +160,10 @@ Files demoreel touches inside the CS2 folder, all removed/restored afterwards: `
   error dialog, or silently not load (symptom: "CS2 wrote no frames" / "No csdm.log was written"). Wait for
   CS Demo Manager to publish new binaries and replace the file. Old demos often cannot be played by a newer
   CS2 at all; the render result carries a warning when the demo's patch differs from the installed one.
-- **One instance at a time.** A lock file (`<data_dir>/ingame/recording.lock`) serializes recordings. Queued
+- **One instance at a time.** A lock file (`<data_dir>/ingame/recording.lock`) serializes recordings, and a
+  second one in the system's temp folder, named after the CS2 folder (`demoreel-cs2-<hash>.lock`), does the same
+  across data folders: two demoreel set-ups on one machine (a checkout and a worktree, say) never record with
+  the same CS2 at once, where each would delete the other's frames. Queued
   jobs do not wait for it on a worker: a worker takes the lock before it takes a recording job, so while the
   game is recording the other workers of that machine leave those jobs in the queue - they run in the order
   they arrived, however many there are - and edit what is already recorded meanwhile. A match is one turn at the game, even when it needs two sessions (normal

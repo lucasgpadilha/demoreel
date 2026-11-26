@@ -406,6 +406,34 @@ def test_a_job_keeps_the_recorder_between_its_renders(env):
     assert len(game.calls) == 2 and not probe.is_held_elsewhere()
 
 
+def test_two_data_folders_never_record_with_the_same_cs2_at_once(env):
+    """The main checkout and a worktree have different recording.lock files but one CS2: the second would delete
+    the first one's frames and patch gameinfo.gi in turn with it."""
+    from dataclasses import replace
+
+    settings, demo, tmp_path = env
+    add_plugin(settings)
+    other = replace(settings, data_dir=tmp_path / "worktree" / "data" / "ingame")
+    assert other.lock_path != settings.lock_path and other.install_lock_path == settings.install_lock_path
+    game = FakeGame(settings)
+    mine, theirs = renderer_for(settings, game), renderer_for(other, game)
+    holder = launcher.RecordingLock(settings.install_lock_path)  # the other checkout, recording
+    assert holder.try_acquire()
+    try:
+        assert mine.recorder_taken()
+        job = make_job(demo, tmp_path, [Clip(segments=[ClipSegment(8000, 8032, STEAM_A)])])
+        job.options.extra["ingame_lock_wait_s"] = 0
+        with pytest.raises(RecorderBusy, match="another data folder"):
+            mine.render(job)
+        assert "recording_in_progress" in mine.availability().details
+        assert mine.availability().details["recording_in_progress"] is True
+    finally:
+        holder.release()
+    with theirs.recorder():  # held for a whole job: the other data folder waits
+        assert mine.recorder_taken()
+    assert not mine.recorder_taken() and game.calls == []
+
+
 def test_the_lock_asked_about_without_detection_is_the_one_recordings_take(tmp_path):
     from demoreel.render.ingame import settings as ingame_settings
 
