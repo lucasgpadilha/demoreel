@@ -6,9 +6,10 @@ Everything the API / MCP server returns about a match is one of these models. St
 
 from __future__ import annotations
 
+import math
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 SCHEMA_VERSION = 1
 
@@ -184,14 +185,43 @@ class TeamSummary(BaseModel):
     won: bool | None = None
 
 
+WORLD_LIMIT = 16384.0  # CS2 world coordinates never leave ±16384 units
+_ON_THE_MAP = {"minimum": -WORLD_LIMIT, "maximum": WORLD_LIMIT}
+
+
 class SegmentCamera(BaseModel):
     """A fixed camera position, as CS2's ``spec_pos`` / ``getpos`` print it (``spec_goto x y z pitch yaw``)."""
 
-    x: float
-    y: float
-    z: float
-    pitch: float = Field(description="Up/down angle in degrees (positive looks down).")
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    x: float = Field(description="World position in game units, within ±16384.", json_schema_extra=_ON_THE_MAP)
+    y: float = Field(description="World position in game units, within ±16384.", json_schema_extra=_ON_THE_MAP)
+    z: float = Field(description="World position in game units, within ±16384.", json_schema_extra=_ON_THE_MAP)
+    pitch: float = Field(description="Up/down angle in degrees, -90..90 (positive looks down).",
+                         json_schema_extra={"minimum": -90, "maximum": 90})
     yaw: float = Field(description="Left/right angle in degrees.")
+
+    @field_validator("x", "y", "z", "pitch", "yaw", mode="before")
+    @classmethod
+    def _nan_as_text(cls, v: Any) -> Any:
+        # NaN / Infinity are refused as "not a finite number"; given as text, the error stays valid JSON.
+        return repr(v) if isinstance(v, float) and not math.isfinite(v) else v
+
+    @field_validator("x", "y", "z")
+    @classmethod
+    def _on_the_map(cls, v: float, info: ValidationInfo) -> float:
+        if not -WORLD_LIMIT <= v <= WORLD_LIMIT:
+            raise ValueError(f"camera {info.field_name} = {v:g} is off the map: CS2 world coordinates are within "
+                             f"±{WORLD_LIMIT:.0f}. Use the numbers `spec_pos` prints in the game's console.")
+        return v
+
+    @field_validator("pitch")
+    @classmethod
+    def _looks_up_or_down(cls, v: float) -> float:
+        if not -90 <= v <= 90:
+            raise ValueError(f"camera pitch = {v:g} is not an angle the camera can take: it must be within -90 "
+                             "(straight up) .. 90 (straight down).")
+        return v
 
 
 class HighlightSegment(BaseModel):

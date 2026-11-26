@@ -734,6 +734,29 @@ def test_edit_operations_switch_a_segment_between_a_player_and_a_fixed_camera(cl
     assert r.status_code == 200 and r.json()["segments"][0]["camera"] == CAM
 
 
+@pytest.mark.parametrize("change, fragment", [
+    ({"x": float("nan")}, "finite"), ({"z": float("inf")}, "finite"), ({"y": 20000.0}, "16384"),
+    ({"x": -16385.0}, "16384"), ({"pitch": 95.0}, "-90"), ({"pitch": -90.5}, "-90"),
+])
+def test_a_camera_off_the_map_is_refused_with_the_valid_range(client, match_id, change, fragment):
+    import json
+
+    from pydantic import ValidationError
+
+    from demoreel.analysis.schema import SegmentCamera
+
+    with pytest.raises(ValidationError) as err:
+        SegmentCamera.model_validate({**CAM, **change})
+    assert fragment in str(err.value)
+    seg = client.get(f"/api/v1/matches/{match_id}/highlights").json()[0]["segments"][0]
+    body = json.dumps({"segments": [{"start_tick": seg["start_tick"], "end_tick": seg["end_tick"],
+                                     "camera": {**CAM, **change}}]})  # NaN / Infinity as Python's json writes them
+    r = client.post(f"/api/v1/matches/{match_id}/highlights", content=body,
+                    headers={"content-type": "application/json"})
+    assert r.status_code == 422 and fragment in r.text  # a validation error, not a server error
+    assert SegmentCamera.model_validate({**CAM, "x": 16384, "pitch": -90}).x == 16384  # the edges are fine
+
+
 def test_render_request_carries_its_format(client, match_id):
     hid = first_highlight(match_id)
     r = client.post(f"/api/v1/highlights/{hid}/renders", json={"renderer": "radar", "options": {"format": "9:16"}})
