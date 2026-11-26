@@ -281,6 +281,19 @@ def test_a_zip_without_a_demo_is_refused_and_removed(client):
     assert r.status_code == 400 and "no .dem" in r.json()["detail"]
 
 
+# ------------------------------------------------------------------------------------------- docker
+
+def test_docker_compose_publishes_the_port_on_this_machine_only():
+    """`docker compose up` is the README's path: it must not open a keyless server to the network."""
+    import re
+    from pathlib import Path
+
+    compose = (Path(__file__).resolve().parent.parent / "docker-compose.yml").read_text(encoding="utf-8")
+    published = re.findall(r'^\s*-\s*"([^"]+:\d+)"\s*$', compose, flags=re.M)
+    assert published and all(p.startswith("127.0.0.1:") for p in published), published
+    assert "DEMOREEL_ADMIN_KEY" in compose
+
+
 # ------------------------------------------------------------------------------------------- webhooks
 
 def test_webhook_addresses_are_shown_to_the_organiser_only(client, admin_key):

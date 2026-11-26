@@ -1,14 +1,23 @@
 # docker compose up --build   ->   http://localhost:8000
+#
+# The port is published on this machine only. Without a key, whoever reaches it may delete matches, read the
+# whole chat, register webhooks and use every MCP tool - and on Linux a port published by Docker goes around
+# ufw. To serve other machines on purpose:
+#   1. set a key, 16+ characters (`openssl rand -hex 24`): DEMOREEL_ADMIN_KEY lets visitors read and only the
+#      organiser change things; DEMOREEL_API_KEY closes everything to whoever lacks it;
+#   2. set DEMOREEL_PUBLIC_URL to the address people will use (links and the accepted host name follow it);
+#   3. publish "8000:8000" (or put a reverse proxy in front, see docs/hosting.md).
 services:
   demoreel:
     build: .
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       # Links returned by the API / MCP tools use this base URL.
       DEMOREEL_PUBLIC_URL: ${DEMOREEL_PUBLIC_URL:-http://localhost:8000}
-      # Set a key before exposing the service beyond your machine.
+      # Set a key before exposing the service beyond your machine (see above).
       DEMOREEL_API_KEY: ${DEMOREEL_API_KEY:-}
+      DEMOREEL_ADMIN_KEY: ${DEMOREEL_ADMIN_KEY:-}
       DEMOREEL_WORKERS: ${DEMOREEL_WORKERS:-1}
       DEMOREEL_AUTO_RENDER_TOP: ${DEMOREEL_AUTO_RENDER_TOP:-3}
     volumes:

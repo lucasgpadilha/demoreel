@@ -2,9 +2,13 @@
 # it needs a machine with CS2, a GPU and a desktop session — run `demoreel worker -c ingame` there.
 FROM python:3.13-slim
 
+# Inside the container the server listens on every interface; what reaches it is decided by the published
+# port (docker-compose.yml: this machine only). The public URL names the host the server answers to while no
+# key is set: change it to the address people use when you expose the port (with a key, see the compose file).
 ENV PYTHONUNBUFFERED=1 PYTHONUTF8=1 \
     UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy \
-    DEMOREEL_DATA_DIR=/data DEMOREEL_HOST=0.0.0.0 DEMOREEL_PORT=8000
+    DEMOREEL_DATA_DIR=/data DEMOREEL_HOST=0.0.0.0 DEMOREEL_PORT=8000 \
+    DEMOREEL_PUBLIC_URL=http://localhost:8000
 
 # skia needs GL/fontconfig at import time; fonts are for the 2D renderer (names with symbols/emoji included)
 RUN apt-get update && apt-get install -y --no-install-recommends \
