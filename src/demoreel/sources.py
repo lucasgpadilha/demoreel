@@ -14,7 +14,10 @@ JSON and one URL per demo. No code is needed for a new site that fits this shape
                  "score_b": "placarB", "has_demo": "demo"}
     }
 
-Source files are written by the operator of the server, so their URLs are trusted configuration.
+Source files are written by the operator of the server, so their URLs are trusted configuration. What the
+sites answer is not: redirects are followed without the source's ``headers`` (often a token) once they leave
+the configured host, a match list may be at most ``MAX_LIST_BYTES`` and a download at most
+``DOWNLOAD_DEADLINE_S`` long.
 
 **Be a polite guest.** Demos are hundreds of megabytes each, and community sites often sit on small hosting
 plans: a bulk import through such a site can exhaust its bandwidth quota and take the whole site down (this
@@ -28,6 +31,8 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -43,11 +48,61 @@ _CACHE: dict[str, tuple[float, list[RemoteMatch]]] = {}
 CACHE_SECONDS = 60
 PAUSE_HOURS = 6.0  # how long a source is left alone after it reports overload
 MIN_DOWNLOAD_INTERVAL_S = 5.0  # breathing room between two demo downloads from the same source
+MAX_REDIRECTS = 5
+MAX_LIST_BYTES = 32 * 1024 * 1024  # a match list of a few thousand rows is well under a megabyte
+DOWNLOAD_DEADLINE_S = 3600.0  # a demo that trickles in for longer is given up (the read timeout alone never fires)
+_REDIRECTS = {301, 302, 303, 307, 308}
 _last_download: dict[str, float] = {}
 
 
 class SourceUnavailable(RuntimeError):
     """The source refused or cannot serve right now; it has been paused."""
+
+
+class SourceError(RuntimeError):
+    """The source answered something this server will not use (too large, not JSON, endless redirects)."""
+
+
+def _origin(url: str | httpx.URL) -> tuple[str, str, int | None]:
+    u = httpx.URL(str(url))
+    return u.scheme, u.host, u.port
+
+
+@contextmanager
+def _get(source: Source, url: str, *, timeout: Any) -> Iterator[httpx.Response]:
+    """GET ``url`` as a stream, following redirects by hand: the source's own headers go only to the scheme,
+    host and port they were configured for, never to the host a redirect points at (a CDN, or anywhere)."""
+    home = _origin(url)
+    for _ in range(MAX_REDIRECTS + 1):
+        headers = {"User-Agent": _USER_AGENT, **(source.headers if _origin(url) == home else {})}
+        with httpx.stream("GET", url, headers=headers, timeout=timeout, follow_redirects=False) as r:
+            location = r.headers.get("location") if r.status_code in _REDIRECTS else None
+            if not location:
+                yield r
+                return
+            target = r.url.join(location)
+            if target.scheme not in ("http", "https"):
+                raise SourceError(f"{source.name} redirected {url} to {target.scheme}:, which is not http(s).")
+            url = str(target)
+    raise SourceError(f"{source.name} redirected more than {MAX_REDIRECTS} times; the last address was {url}. "
+                      "Check the source's URLs.")
+
+
+def _read_json(source: Source, r: httpx.Response) -> Any:
+    declared = str(r.headers.get("content-length") or "")
+    too_large = SourceError(f"{source.name}'s match list is larger than {MAX_LIST_BYTES // (1024 * 1024)} MB; "
+                            "this server does not read lists that large. Check the source's list_url.")
+    if declared.isdigit() and int(declared) > MAX_LIST_BYTES:
+        raise too_large
+    body = bytearray()
+    for chunk in r.iter_bytes():
+        body += chunk
+        if len(body) > MAX_LIST_BYTES:
+            raise too_large
+    try:
+        return json.loads(bytes(body))
+    except ValueError as exc:
+        raise SourceError(f"{source.name}'s match list is not JSON ({exc}). Check the source's list_url.") from exc
 
 
 def _pause_file(source_id: str) -> Path:
@@ -203,16 +258,17 @@ def list_remote(source: Source, *, fresh: bool = False) -> list[RemoteMatch]:
             return saved
         raise SourceUnavailable(f"{source.name} is paused ({paused(source.id)['reason']}) and no saved list exists.")
     try:
-        r = httpx.get(source.list_url, headers={"User-Agent": _USER_AGENT, **source.headers}, timeout=30,
-                      follow_redirects=True)
-        _check(source, r)
-        r.raise_for_status()
-    except (httpx.HTTPError, SourceUnavailable):
+        with _get(source, source.list_url, timeout=30) as r:
+            if r.status_code >= 400:
+                r.read()
+            _check(source, r)
+            r.raise_for_status()
+            rows = _read_json(source, r)
+    except (httpx.HTTPError, SourceUnavailable, SourceError):
         saved = last_good()
         if saved is not None:
             return saved
         raise
-    rows = r.json()
     if isinstance(rows, dict):  # {"data": [...]} style envelopes
         rows = next((v for v in rows.values() if isinstance(v, list)), [])
     f = source.fields
@@ -249,9 +305,8 @@ def download_demo(source: Source, remote_id: str, dest: Path, progress=lambda fr
     wait = MIN_DOWNLOAD_INTERVAL_S - (time.monotonic() - _last_download.get(source.id, -1e9))
     if wait > 0:
         time.sleep(wait)
-    written = 0
-    with httpx.stream("GET", url, headers={"User-Agent": _USER_AGENT, **source.headers}, timeout=httpx.Timeout(30, read=120),
-                      follow_redirects=True) as r:
+    written, started = 0, time.monotonic()
+    with _get(source, url, timeout=httpx.Timeout(30, read=120)) as r:
         _last_download[source.id] = time.monotonic()
         if r.status_code == 404:
             raise RuntimeError(f"{source.name} has no demo for match {remote_id}.")
@@ -265,6 +320,10 @@ def download_demo(source: Source, remote_id: str, dest: Path, progress=lambda fr
                 written += len(chunk)
                 if written > limit:
                     raise RuntimeError(f"Demo is larger than the {get_settings().max_upload_mb} MB limit.")
+                if time.monotonic() - started > DOWNLOAD_DEADLINE_S:
+                    raise RuntimeError(f"{source.name} took more than {DOWNLOAD_DEADLINE_S / 60:.0f} minutes to "
+                                       f"send the demo of match {remote_id} ({written // (1024 * 1024)} MB so far). "
+                                       "Try again later.")
                 out.write(chunk)
                 progress(min(0.9, 0.9 * written / total) if total else 0.3,
                          f"Downloading demo ({written // (1024 * 1024)} MB)")

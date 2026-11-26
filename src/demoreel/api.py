@@ -241,6 +241,8 @@ def list_source_matches(source_id: str) -> list[RemoteMatchOut]:
             return [RemoteMatchOut(**row) for row in service.remote_matches(s, source)]
     except src.SourceUnavailable as exc:
         raise HTTPException(503, str(exc)) from exc
+    except src.SourceError as exc:
+        raise HTTPException(502, str(exc)) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"Could not reach {source.name}: {exc}") from exc
 
@@ -266,6 +268,8 @@ def import_from_source(source_id: str, body: ImportRequest) -> ImportAccepted:
             return ImportAccepted(jobs=[service.job_out(j) for j in queued], skipped=skipped, detail=detail)
     except src.SourceUnavailable as exc:
         raise HTTPException(503, str(exc)) from exc
+    except src.SourceError as exc:
+        raise HTTPException(502, str(exc)) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"Could not reach {source.name}: {exc}") from exc
 

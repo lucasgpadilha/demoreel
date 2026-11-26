@@ -486,6 +486,7 @@ def source(monkeypatch):
 
     class FakeResponse:
         status_code = 200
+        headers: dict = {}
 
         def raise_for_status(self):
             return None
@@ -493,7 +494,19 @@ def source(monkeypatch):
         def json(self):
             return REMOTE
 
+        def iter_bytes(self, *a):
+            import json
+
+            yield json.dumps(REMOTE).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
     monkeypatch.setattr(src.httpx, "get", lambda *a, **k: FakeResponse())
+    monkeypatch.setattr(src.httpx, "stream", lambda *a, **k: FakeResponse())  # the list is read as a stream
     s = src.Source(id="testsite", name="Test Site", url="https://example.test/partidas", brand=None,
                    list_url="https://example.test/api/partidas", demo_url="https://example.test/api/partidas/{id}/demo",
                    page_url="https://example.test/partidas/{id}",

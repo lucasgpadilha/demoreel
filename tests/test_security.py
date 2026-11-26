@@ -318,6 +318,97 @@ def test_visitors_see_which_renderers_exist_but_not_why_or_where(client, admin_k
     assert "DEMOREEL_INGAME_ENABLED" in next(r for r in organiser if r["name"] == "ingame")["reason"]
 
 
+# ------------------------------------------------------------------------------------------- match sources
+
+@pytest.fixture
+def site(monkeypatch):
+    """A match source whose site is played by a table of canned answers; records what each request carried."""
+    import contextlib
+
+    import httpx
+
+    from demoreel import sources as src
+
+    answers: dict[str, httpx.Response] = {}
+    seen: list[tuple[str, dict]] = []
+
+    def stream(method, url, headers=None, **kwargs):
+        assert kwargs.get("follow_redirects") is False  # redirects are followed by hand
+        seen.append((str(url), dict(headers or {})))
+        answer = answers[str(url)]
+        return contextlib.nullcontext(httpx.Response(answer.status_code, headers=answer.headers,
+                                                     content=answer.content, request=httpx.Request(method, url)))
+
+    monkeypatch.setattr(src.httpx, "stream", stream)
+    monkeypatch.setattr(src, "MIN_DOWNLOAD_INTERVAL_S", 0.0)
+    source = src.Source(id="mixdavila-test", name="Mix da Vila", list_url="https://mixdavila.example/api/partidas",
+                        demo_url="https://mixdavila.example/api/partidas/{id}/demo",
+                        headers={"X-Token": "site-token"})
+    yield source, answers, seen
+    src._CACHE.clear()
+    src._cache_file(source.id).unlink(missing_ok=True)
+
+
+def test_a_redirect_to_another_host_does_not_carry_the_sources_headers(site):
+    import httpx
+
+    from demoreel import sources as src
+
+    source, answers, seen = site
+    answers[source.list_url] = httpx.Response(302, headers={"location": "/api/v2/partidas"})
+    answers["https://mixdavila.example/api/v2/partidas"] = httpx.Response(
+        302, headers={"location": "https://cdn.example/lists/partidas.json"})
+    answers["https://cdn.example/lists/partidas.json"] = httpx.Response(200, json=[{"id": 1, "map": "de_nuke"}])
+    rows = src.list_remote(source, fresh=True)
+    assert [r.remote_id for r in rows] == ["1"]
+    assert [h.get("X-Token") for _, h in seen] == ["site-token", "site-token", None]  # same host, same, CDN
+    assert all(h["User-Agent"] == "demoreel" for _, h in seen)
+
+
+def test_endless_redirects_and_odd_lists_are_refused_with_a_reason(site, monkeypatch):
+    import httpx
+
+    from demoreel import sources as src
+
+    source, answers, _ = site
+    answers[source.list_url] = httpx.Response(302, headers={"location": source.list_url})
+    with pytest.raises(src.SourceError, match="redirected more than"):
+        src.list_remote(source, fresh=True)
+    answers[source.list_url] = httpx.Response(200, content=b"<html>not json</html>")
+    with pytest.raises(src.SourceError, match="not JSON"):
+        src.list_remote(source, fresh=True)
+    from demoreel.api import create_app
+
+    saved = src.save_source(source)
+    try:
+        with TestClient(create_app()) as c:
+            r = c.get(f"/api/v1/sources/{source.id}/matches")
+        assert r.status_code == 502 and "not JSON" in r.json()["detail"]
+    finally:
+        saved.unlink()
+    monkeypatch.setattr(src, "MAX_LIST_BYTES", 64)
+    answers[source.list_url] = httpx.Response(200, json=[{"id": i} for i in range(50)])
+    with pytest.raises(src.SourceError, match="larger than"):
+        src.list_remote(source, fresh=True)
+
+
+def test_a_demo_that_trickles_in_too_long_is_given_up(site, monkeypatch, tmp_path):
+    import httpx
+
+    from demoreel import service
+    from demoreel import sources as src
+
+    source, answers, seen = site
+    answers["https://mixdavila.example/api/partidas/7/demo"] = httpx.Response(
+        302, headers={"location": "https://files.example/7.dem"})
+    answers["https://files.example/7.dem"] = httpx.Response(200, content=service.CS2_MAGIC + b"\0" * 1024)
+    assert src.download_demo(source, "7", tmp_path / "7.dem") > 0
+    assert seen[-1][1].get("X-Token") is None  # the file host never saw the token
+    monkeypatch.setattr(src, "DOWNLOAD_DEADLINE_S", -1.0)
+    with pytest.raises(RuntimeError, match="took more than"):
+        src.download_demo(source, "7", tmp_path / "again.dem")
+
+
 # ------------------------------------------------------------------------------------------- headers
 
 @pytest.fixture
