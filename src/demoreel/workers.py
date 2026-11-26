@@ -37,7 +37,7 @@ from .analysis.schema import MatchAnalysis
 from .brand import brand_for
 from .config import get_settings
 from .db import Highlight, Job, Render, Worker, WorkerMaster, now, session_scope
-from .render.base import segment_view
+from .render.base import parse_camera_view, segment_view
 from .schemas import JobOut, RenderOptionsIn, WorkerFinish, WorkerOut
 from .webhooks import emit
 
@@ -176,9 +176,21 @@ def footage_holder(s: Session, match_id: str, segments: list, *, width: int, hei
     return None
 
 
-def sync_masters(s: Session, worker: Worker, items: list[dict[str, Any]], *, replace: bool = False) -> int:
+def _matches_of(s: Session, worker: Worker) -> set[str]:
+    """Matches this worker may keep footage of: those of the jobs it took, and those it already reported."""
+    ran = s.scalars(select(Job.match_id).where(Job.worker_id == _job_owner(worker.id), Job.match_id.is_not(None)))
+    kept = s.scalars(select(WorkerMaster.match_id).where(WorkerMaster.worker_id == worker.id))
+    return {*ran, *kept}
+
+
+def sync_masters(s: Session, worker: Worker, items: list[dict[str, Any]], *, replace: bool = False,
+                 match_id: str | None = None) -> int:
     """Record which footage a worker keeps. ``replace``: the list is everything it has (what is missing from
-    it was deleted there); otherwise the items are added to what is known. Returns how many it now keeps."""
+    it was deleted there); otherwise the items are added to what is known. Returns how many it now keeps.
+
+    Footage attracts the edits of its match to whoever keeps it, so a worker cannot claim footage of any match
+    it likes: the result of a job (``match_id``) may only describe footage of that job's match, and a full
+    report (``replace``) only keeps matches the worker took a job of or reported before."""
     from .compose import master as masters
 
     if len(items) > MAX_MASTERS:
@@ -191,6 +203,19 @@ def sync_masters(s: Session, worker: Worker, items: list[dict[str, Any]], *, rep
                 f"Recording #{i + 1} is not a master description. Send the content of the .json file stored next "
                 "to the footage (id, match_id, width, height, fps, spans, covered, options, xray).")
         parsed.append(m)
+    if match_id is not None:
+        wrong = sorted({m.match_id for m in parsed if m.match_id != match_id})
+        if wrong:
+            raise service.ServiceError(f"This job is about match {match_id}, but its result describes footage of "
+                                       f"{', '.join(wrong[:5])}. A job's result can only describe the footage "
+                                       "made for it.")
+    elif replace:
+        known = _matches_of(s, worker)
+        unknown = sorted({m.match_id for m in parsed if m.match_id not in known})
+        if unknown:
+            log.warning("worker %s reported footage of matches it never worked on, ignored: %s", worker.name,
+                        ", ".join(unknown[:10]))
+            parsed = [m for m in parsed if m.match_id in known]
     if replace:
         s.execute(delete(WorkerMaster).where(WorkerMaster.worker_id == worker.id))
     else:
@@ -221,8 +246,9 @@ def _clips(s: Session, highlight_ids: list[str]) -> list[dict[str, Any]]:
         out.append({"highlight_id": h.id, "title": h.title, "subtitle": h.description, "version": h.version,
                     "action_ticks": list(h.action_ticks or []),
                     "segments": [{"start_tick": x["start_tick"], "end_tick": x["end_tick"],
-                                  "pov_steamid": segment_view(x), "speed": float(x.get("speed") or 1.0),
-                                  "caption": x.get("caption"), "role": x.get("role") or "play"}
+                                  "pov_steamid": segment_view(x), "camera": x.get("camera"),
+                                  "speed": float(x.get("speed") or 1.0), "caption": x.get("caption"),
+                                  "role": x.get("role") or "play"}
                                  for x in (h.segments or [])]})
     return out
 
@@ -297,19 +323,63 @@ def claim(worker_id: str, capabilities: list[str], info: dict[str, Any] | None =
         if info is not None:
             w.info = {str(k)[:40]: (v if isinstance(v, int | float | bool) else str(v)[:200])
                       for k, v in list(info.items())[:20]}
+        name = w.name
+    speaks = worker_protocol(info)
     if time.monotonic() - _last_sweep > 30:  # a server without workers of its own has nobody else to do this
         _last_sweep = time.monotonic()
         jobs.requeue_stale()
-    for _ in range(5):
-        job = jobs.claim(_job_owner(worker_id), allowed, target=worker_id, types=list(JOB_TYPES))
+    passed: list[str] = []  # jobs this worker cannot understand: left in the queue for one that can
+    failed = 0
+    while failed < 5 and len(passed) < 200:
+        job = jobs.claim(_job_owner(worker_id), allowed, target=worker_id, types=list(JOB_TYPES), exclude=passed)
         if job is None:
             return None
+        with session_scope() as s:
+            row = s.get(Job, job.id)
+            if speaks < CAMERA_PROTOCOL and _uses_camera(s, row):
+                jobs.give_back(s, row, f"Waiting for a worker that films fixed cameras (worker protocol "
+                                       f"{CAMERA_PROTOCOL}); {name} speaks {speaks}: update demoreel there")
+                passed.append(job.id)
+                continue
         try:
             with session_scope() as s:
                 return job_spec(s, s.get(Job, job.id))
         except service.ServiceError as exc:  # the job can no longer be done (its match or plays are gone)
             jobs.close(job.id, "failed", None, exc.message)
+            failed += 1
     return None
+
+
+# What a worker program understands, as it says in `info.protocol` when it asks for work (docs/workers.md):
+#   1 (or nothing said): the protocol as first published;
+#   2: segments filmed from a fixed camera - `pov_steamid` "cam:x,y,z,pitch,yaw", plus `camera` {x, y, z, pitch,
+#      yaw} next to it. A worker that does not know them would take "cam:..." for a SteamID.
+WORKER_PROTOCOL = 2
+CAMERA_PROTOCOL = 2
+
+
+def worker_protocol(info: dict[str, Any] | None) -> int:
+    try:
+        return max(1, int((info or {}).get("protocol") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _uses_camera(s: Session, job: Job | None) -> bool:
+    """Does this job film a segment from a fixed camera?"""
+    if job is None:
+        return False
+    ids: list[str] = []
+    if job.type == "render" and job.render_id:
+        r = s.get(Render, job.render_id)
+        ids = list(r.highlight_ids or []) if r is not None else []
+    elif job.type == "capture_match":
+        ids = list((job.payload or {}).get("highlight_ids") or [])
+    if not ids:
+        return False
+    return any(parse_camera_view(segment_view(seg)) is not None
+               for segments in s.scalars(select(Highlight.segments).where(Highlight.id.in_(ids)))
+               for seg in (segments or []))
 
 
 def _owned(s: Session, worker_id: str, job_id: str) -> Job:
@@ -499,7 +569,7 @@ def _apply_render(s: Session, job: Job, worker: Worker, given: dict[str, Any]) -
     if s.get(Render, render_id) is None:
         raise _Gone()
     if res.masters:  # checked before any file is moved: a refused result must leave the uploads as they are
-        sync_masters(s, worker, res.masters)
+        sync_masters(s, worker, res.masters, match_id=job.match_id or "")
     final = settings.path("renders", f"{render_id}.mp4")
     video.replace(final)
     poster = final.with_suffix(".jpg")
@@ -527,7 +597,7 @@ def _apply_capture(s: Session, job: Job, worker: Worker, given: dict[str, Any]) 
     if not isinstance(masters, list) or not masters:
         raise service.ServiceError("The result of a capture_match job needs `masters`: the description of each "
                                    "recording made (the .json stored next to the footage).")
-    sync_masters(s, worker, masters)  # before queueing: the videos are then addressed to this worker
+    sync_masters(s, worker, masters, match_id=job.match_id or "")  # before queueing: addressed to this worker
     payload = dict(job.payload or {})
     formats = list((payload.get("then") or {}).get("formats") or [])
     queued = service.queue_after_capture(s, job.match_id or "", list(payload.get("highlight_ids") or []), formats)

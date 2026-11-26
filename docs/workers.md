@@ -70,7 +70,7 @@ All routes are under `/api/v1/worker`. Errors are JSON `{"detail": "..."}` writt
 | Step | Request | Answer |
 |---|---|---|
 | Test the token | `GET /me` | the worker as the server sees it |
-| Take a job | `POST /claim` `{"capabilities": ["cpu", "ingame"], "info": {"version": "…"}}` | `200` the job, or `204` nothing to do |
+| Take a job | `POST /claim` `{"capabilities": ["cpu", "ingame"], "info": {"protocol": 2, "version": "…"}}` | `200` the job, or `204` nothing to do |
 | Read inputs | `GET /jobs/{id}/files/demo.dem`, `…/analysis.json` | the file, or `404` saying where else to look |
 | Read the brand kit | `GET /jobs/{id}/brand`, `GET /jobs/{id}/brand/{path}` | file list with sizes and hashes; one file |
 | Stay alive | `POST /jobs/{id}/heartbeat` `{"progress": 0.4, "message": "Recording"}` | `{"cancel_requested": false}` |
@@ -100,6 +100,13 @@ All routes are under `/api/v1/worker`. Errors are JSON `{"detail": "..."}` writt
 
 `inputs.demo.dem` is `false` when the server does not keep the demo (a server fed by a recording machine
 never did). The worker then looks on its own disk, by the SHA-256 or the file name in `match`.
+
+**Protocol version.** A worker says in `info.protocol` which version of this protocol it understands; saying
+nothing means 1. Version 2 adds segments filmed from a **fixed camera** instead of a player: their
+`pov_steamid` is `"cam:x,y,z,pitch,yaw"` and `camera` holds `{x, y, z, pitch, yaw}` (the numbers CS2's `spec_pos`
+prints; `null` for player segments). A job with such a segment is only handed to a worker that says
+`"protocol": 2` or more; for the others it stays in the queue, in its place, with a message saying why, and
+they get the next job. The server speaks version 2.
 
 **Heartbeat.** At least every `heartbeat_seconds`. A job with no heartbeat for `stale_after_seconds` goes back
 to the queue (it fails after two attempts). When the answer says `cancel_requested`, stop and finish the job
@@ -133,7 +140,10 @@ footage**; other workers never see it.
 
 - After a `capture_match`, the videos of the recorded plays are queued for that same worker.
 - `PUT /masters` replaces the server's list with what the worker really has (call it at start-up: footage
-  deleted on the worker to free disk space then stops being counted on).
+  deleted on the worker to free disk space then stops being counted on). Footage draws the edits of its match
+  to whoever keeps it, so the server keeps only footage of matches that worker took a job of, or reported
+  before; the rest of the report is ignored. The `masters` of a job's result must be of that job's match, or
+  the result is refused (`400`, the job stays with the worker).
 - Removing a worker fails the queued edits that only it could do, with the reason. Asking for those videos
   again records the plays once more.
 
@@ -143,3 +153,12 @@ footage**; other workers never see it.
 |---|---|---|
 | `DEMOREEL_WORKER_MAX_FILE_MB` | `1024` | largest video a worker may send back |
 | `DEMOREEL_WORKERS` | `1` | workers started *on the server itself*; `0` on a server that only hands work out |
+
+## Stopping a worker
+
+`demoreel serve` asks the workers it started to stop when it stops, and gives them 30 s before ending them.
+A worker started with `demoreel worker` stops the same way on Ctrl+C, SIGTERM or Ctrl+Break: the job it runs
+is cancelled at its next check - a recording closes the game and puts the CS2 folder back - and goes back to
+the queue, where the next worker takes it; it is not counted as an attempt. A second signal stops it at once.
+Should a worker die anyway (closed window, crash), the game it started dies with it, and the CS2 folder is put
+back the next time `serve`, `worker` or `doctor` starts there ([details](ingame-recording.md#how-it-works)).

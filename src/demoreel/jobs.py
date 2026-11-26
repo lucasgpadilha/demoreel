@@ -228,16 +228,19 @@ def _mark_target_failed(s: Session, job: Job, error: str) -> None:
 
 
 def claim(worker_id: str, capabilities: list[str], *, target: str | None = None,
-          types: list[str] | None = None) -> Job | None:
+          types: list[str] | None = None, exclude: list[str] | None = None) -> Job | None:
     """Atomically take the next queued job this worker can run.
 
     Jobs addressed to one remote worker are only handed to it (``target`` = its id); the workers of this
     machine never take them, because the footage those jobs need is not on this disk. ``types`` narrows the
-    kinds of job taken (a remote worker cannot run the ones that write to this server's disk)."""
+    kinds of job taken (a remote worker cannot run the ones that write to this server's disk); ``exclude``
+    leaves out jobs this worker just gave back because it cannot run them."""
     mine = Job.target_worker.is_(None) if target is None else or_(Job.target_worker.is_(None),
                                                                    Job.target_worker == target)
     if types is not None:
         mine = and_(mine, Job.type.in_(types))
+    if exclude:
+        mine = and_(mine, Job.id.not_in(exclude))
     with session_scope() as s:
         for _ in range(5):
             job_id = s.scalar(select(Job.id).where(Job.status == "queued", Job.capability.in_(capabilities), mine)

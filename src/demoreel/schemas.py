@@ -749,7 +749,9 @@ class WorkerClaim(BaseModel):
     capabilities: list[str] = Field(default_factory=lambda: ["cpu"],
                                     description="What the worker can take right now. Leave 'ingame' out while "
                                                 "the machine must not record (people playing on it).")
-    info: dict[str, Any] | None = Field(None, description="Version, operating system, anything worth showing.")
+    info: dict[str, Any] | None = Field(None, description=(
+        "Version, operating system, anything worth showing. `protocol`: the worker protocol it understands (1 when "
+        "not given; 2 adds fixed-camera segments, see docs/workers.md)."))
 
 
 class WorkerProgress(BaseModel):
