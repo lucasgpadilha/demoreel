@@ -18,9 +18,6 @@ _spec = importlib.util.spec_from_file_location("build_skill_zip", ROOT / "script
 bsz = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(bsz)
 
-# Named in SKILL.md ahead of mcp_server.py; drop a name from here once the server registers it.
-DOCUMENTED_AHEAD = {"set_category"}
-
 
 def _skill(tmp_path: Path, frontmatter: str | None = None, body: str = "Body.\n", name: str = "demo-skill") -> Path:
     d = tmp_path / name
@@ -56,7 +53,7 @@ def test_the_skill_only_names_tools_the_mcp_server_has():
     assert {"list_matches", "get_job", "create_highlight"} <= registered
     named = set(re.findall(r"`([a-z][a-z_]+)\(", (SKILL / "SKILL.md").read_text(encoding="utf-8")))
     assert named, "SKILL.md names no tools"
-    unknown = named - registered - DOCUMENTED_AHEAD
+    unknown = named - registered
     assert not unknown, f"SKILL.md names tools the MCP server does not have: {sorted(unknown)}"
 
 
