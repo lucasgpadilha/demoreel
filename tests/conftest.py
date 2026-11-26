@@ -83,6 +83,14 @@ def ace_round(rnd: int = 1) -> tuple[str, list[dict]]:
     return "CT", [kill(base + i * 80, rnd, "ct1", t, headshot=i % 2 == 0) for i, t in enumerate(T)]
 
 
+@pytest.fixture(autouse=True)
+def _no_anti_cheat_running(monkeypatch):
+    """An anti-cheat open on the developer's machine (FACEIT...) must not change which recorder a test sees."""
+    from demoreel.render.ingame import procs
+
+    monkeypatch.setattr(procs, "running_anti_cheats", lambda names=None: [])
+
+
 @pytest.fixture
 def sample_demo() -> ParsedDemo:
     r2_base = ROUND_TICKS + 2000

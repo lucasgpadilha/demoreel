@@ -213,6 +213,12 @@ like its takes (`<n>-sequence…`) are deleted, then the folders left empty.
   recorded again at once with the game's own recorder, and that HLAE is not used with that CS2 patch again
   (`<data_dir>/ingame/hlae-failures.json`; a newer HLAE folder or the next CS2 patch tries it again; `doctor`
   shows it as `hlae_failed_with_this_patch`). A backend asked for by name is never swapped.
+  An anti-cheat that runs outside a match - FACEIT's (`faceitclient.exe`, `faceitservice.exe`) - does not let
+  HLAE start CS2 at all: HLAE shows "the loader could not create the requested process" with
+  `GetLastWin32Error = 5` (access denied). While one runs, `auto` records with the game's own recorder without
+  starting HLAE, HLAE asked for by name fails with a message saying to quit the anti-cheat (from the system
+  tray: closing its window is not enough), and nothing goes into `hlae-failures.json`: HLAE is used again once
+  the anti-cheat is closed. Recorded on 2026-11-26.
   Then wait for CS Demo Manager / HLAE to publish new binaries and replace the file. Old demos often cannot be
   played by a newer CS2 at all; the render result carries a warning when the demo's patch differs from the
   installed one.

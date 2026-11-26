@@ -73,7 +73,17 @@ class _GameDidNotQuit(RenderError):
 
 class HlaeFailed(RenderError):
     """Recording failed for a reason that is HLAE's - its loader, or its hook in the game - not the plugin's or
-    the demo's. With the ``auto`` backend the render is then recorded again with the game's own recorder."""
+    the demo's. With the ``auto`` backend the render is then recorded again with the game's own recorder.
+    ``anti_cheats``: the running anti-cheats that kept HLAE from the game (then HLAE itself is not to blame)."""
+
+    def __init__(self, message: str, *, anti_cheats: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.anti_cheats = list(anti_cheats or [])
+
+
+def anti_cheat_note(names: list[str]) -> str:
+    return (f"{' and '.join(names)} is running on this machine, and it does not let HLAE start CS2. Close it "
+            "(not just its window: quit it from the system tray) to record with HLAE.")
 
 
 # An error box that names HLAE's hook (after a CS2 update: "AfxHookSource2 ... addresses.cpp ...").
@@ -118,8 +128,10 @@ class IngameRenderer:
                  is_cs2_running: Callable[[], bool | None] = procs.is_cs2_running,
                  is_steam_running: Callable[[], bool | None] = procs.is_steam_running,
                  dedicated_servers: Callable[[], list[procs.GameProcess]] = procs.dedicated_servers,
-                 find_dialog: Callable[[str | None], str | None] = procs.game_dialog) -> None:
+                 find_dialog: Callable[[str | None], str | None] = procs.game_dialog,
+                 anti_cheats: Callable[[], list[str]] | None = None) -> None:
         self._settings = settings
+        self._anti_cheats = anti_cheats  # None: procs.running_anti_cheats, looked up when it is needed
         self._run_game = run_game
         self._run_loader = run_loader
         self._resolve_slots = resolve_slots
@@ -128,6 +140,13 @@ class IngameRenderer:
         self._dedicated_servers = dedicated_servers
         self._find_dialog = find_dialog  # (marker of the recording's game) -> "title: text" of an error box
         self._install_lock_cache: tuple[float, Path | None] | None = None
+
+    def _blocking_anti_cheats(self) -> list[str]:
+        """Running anti-cheats that do not let HLAE start the game (empty when none, or when unknown)."""
+        try:
+            return list((self._anti_cheats or procs.running_anti_cheats)())
+        except Exception:  # noqa: BLE001 - a check, never a reason to fail
+            return []
 
     def _shared_install(self, settings: IngameSettings) -> str | None:
         """Why recording must not start when a dedicated server runs from the very folder the game is recorded
@@ -361,14 +380,19 @@ class IngameRenderer:
             except HlaeFailed as exc:
                 if not auto:
                     raise
-                # After a CS2 update HLAE is usually the first to break: record this one with the game's own
-                # recorder, and keep doing so for this HLAE and this CS2 patch until either changes.
-                remember_hlae_failure(settings, str(exc))
-                log.warning("HLAE failed; recording again with the game's own recorder: %s", exc)
+                if exc.anti_cheats:
+                    # Not HLAE's fault: it is tried again once the anti-cheat is closed.
+                    why = anti_cheat_note(exc.anti_cheats)
+                else:
+                    # After a CS2 update HLAE is usually the first to break: record this one with the game's own
+                    # recorder, and keep doing so for this HLAE and this CS2 patch until either changes.
+                    remember_hlae_failure(settings, str(exc))
+                    why = str(exc)
+                log.warning("HLAE failed; recording again with the game's own recorder: %s", why)
                 job.progress(0.05, "HLAE did not record; recording with the game's own recorder")
                 result = self._render_locked(job, settings, backend="startmovie")
                 result.details["warnings"].insert(0, f"Recorded with the game's own recorder instead of HLAE. "
-                                                     f"{exc}")
+                                                     f"{why}")
                 return result
 
     @staticmethod
@@ -398,6 +422,14 @@ class IngameRenderer:
                 warnings.append(f"{_hlae_name(settings)} is not used with this CS2 patch: it did not record with "
                                 f"it before ({failed}). Install a newer HLAE in {settings.hlae_root}/<version>/ "
                                 "to try HLAE again.")
+            blockers = self._blocking_anti_cheats() if backend == "hlae" else []
+            if blockers:  # HLAE would only show its "access denied" box on the desktop
+                if self._requested_backend(settings, extra) != "auto":
+                    raise HlaeFailed(f"{anti_cheat_note(blockers)} Or record with the game's own recorder: "
+                                     "options.extra.ingame_backend = \"startmovie\".", anti_cheats=blockers)
+                backend = "startmovie"
+                warnings.append(f"Recorded with the game's own recorder instead of HLAE. "
+                                f"{anti_cheat_note(blockers)}")
         hlae = backend == "hlae"
         hlae_dir = Path(os.path.abspath(job.work_dir)) / "hlae"
         width, height, fps = encode.even(options.width), encode.even(options.height), max(1, int(options.fps))
@@ -570,8 +602,10 @@ class IngameRenderer:
                 except _GameDidNotQuit as exc:
                     warnings.append(str(exc))
                 except launcher.LoaderFailed as exc:
+                    blockers = self._blocking_anti_cheats()
+                    advice = anti_cheat_note(blockers) if blockers else hlae_advice(settings)
                     raise HlaeFailed(f"{_hlae_name(settings)} ({settings.hlae_exe}) could not start CS2 patch "
-                                     f"{launch.patch or '(unknown)'}: {exc} {hlae_advice(settings)}") from exc
+                                     f"{launch.patch or '(unknown)'}: {exc} {advice}", anti_cheats=blockers) from exc
                 finally:
                     # gameinfo.gi and the plugin's settings file are restored and the plugin removed when this
                     # block ends - also when the game was just killed: let it go first (the plugin writes its

@@ -26,6 +26,9 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 STEAM_PROCESS_NAMES = ("steam.exe", "steamchina.exe") if sys.platform == "win32" else ("steam",)
 CS2_PROCESS_NAMES = ("cs2.exe",) if sys.platform == "win32" else ("cs2",)
 _DEDICATED = re.compile(r"(?<!\S)-dedicated(?!\S)", re.IGNORECASE)
+# Anti-cheats that run outside a match and refuse HLAE the access it needs to start CS2 with its hook (HLAE
+# shows "the loader could not create the requested process", GetLastWin32Error = 5). Image name -> its name.
+ANTI_CHEAT_PROCESSES = {"faceitclient.exe": "FACEIT Anti-Cheat", "faceitservice.exe": "FACEIT Anti-Cheat"}
 
 
 @dataclass(frozen=True)
@@ -121,6 +124,13 @@ def running_process_names() -> set[str] | None:
     """Lower-case image names of every running process, or ``None`` when they cannot be listed."""
     found = running_processes()
     return None if found is None else {name for _pid, name in found}
+
+
+def running_anti_cheats(names: set[str] | None = None) -> list[str]:
+    """The anti-cheats of :data:`ANTI_CHEAT_PROCESSES` that are running; empty when none is, or when the
+    processes cannot be listed."""
+    names = running_process_names() if names is None else names
+    return sorted({label for image, label in ANTI_CHEAT_PROCESSES.items() if image in (names or ())})
 
 
 def _windows_details(pid: int) -> tuple[str | None, str | None]:

@@ -18,6 +18,9 @@ from demoreel.analysis.schema import MatchAnalysis
 from demoreel.render import ffmpeg
 from demoreel.render.base import Clip, ClipSegment, RenderError, RenderJob, RenderOptions
 from demoreel.render.ingame import IngameRenderer, encode, launcher, plugin, procs
+from demoreel.render.ingame.procs import (
+    running_anti_cheats as real_running_anti_cheats,  # before conftest's patch
+)
 from demoreel.render.ingame.renderer import HlaeFailed, _Launch
 from demoreel.render.ingame.settings import IngameSettings
 
@@ -253,6 +256,69 @@ def test_the_error_box_of_a_broken_hlae_ends_the_wait_at_once_and_auto_records_w
     from dataclasses import replace
 
     assert renderer(settings)._backend(replace(settings, hlae_exe=newer), {}) == "hlae"
+
+
+FACEIT = ["FACEIT Anti-Cheat"]
+
+
+def _failures(settings) -> Path:
+    return settings.data_dir / "hlae-failures.json"
+
+
+def test_with_an_anti_cheat_running_auto_records_with_the_game_and_hlae_is_not_started(hlae_env):
+    """FACEIT's anti-cheat refuses HLAE the game ("access denied" box on the desktop): do not even try."""
+    settings, demo, tmp_path = hlae_env
+    loader, game = FakeHlae(settings), FakeGame(settings)
+    rendering = IngameRenderer(settings, run_loader=loader, run_game=game, resolve_slots=lambda d, t: {STEAM_A: 6},
+                               is_cs2_running=lambda: False, is_steam_running=lambda: True,
+                               find_dialog=lambda marker: None, anti_cheats=lambda: FACEIT)
+    result = rendering.render(make_job(demo, tmp_path, CLIP))
+    assert loader.calls == [] and game.calls == 1 and result.details["backend"] == "startmovie"
+    assert any("FACEIT Anti-Cheat is running" in w and "system tray" in w for w in result.details["warnings"])
+    assert not _failures(settings).exists(), "an anti-cheat is not HLAE's fault: nothing to remember"
+
+    with pytest.raises(HlaeFailed, match="FACEIT Anti-Cheat is running") as excinfo:  # HLAE asked for by name
+        rendering.render(make_job(demo, tmp_path / "named", CLIP, ingame_backend="hlae"))
+    assert 'ingame_backend = "startmovie"' in str(excinfo.value) and loader.calls == []
+
+
+def test_hlae_refused_by_an_anti_cheat_started_meanwhile_is_not_remembered_as_broken(hlae_env):
+    settings, demo, tmp_path = hlae_env
+    seen = iter([[], FACEIT])  # closed when the recording starts, open when HLAE fails
+
+    def refused(command, **kwargs):
+        raise launcher.LoaderFailed("HLAE could not start the game (exit code 1).")
+
+    game = FakeGame(settings)
+    rendering = IngameRenderer(settings, run_loader=refused, run_game=game, resolve_slots=lambda d, t: {STEAM_A: 6},
+                               is_cs2_running=lambda: False, is_steam_running=lambda: True,
+                               find_dialog=lambda marker: None, anti_cheats=lambda: next(seen, FACEIT))
+    result = rendering.render(make_job(demo, tmp_path, CLIP))
+    assert game.calls == 1 and result.details["backend"] == "startmovie"
+    first = result.details["warnings"][0]
+    assert first.startswith("Recorded with the game's own recorder instead of HLAE.") and "FACEIT" in first
+    assert "newer HLAE" not in first
+    assert not _failures(settings).exists() and rendering._backend(settings, {}) == "hlae"
+
+
+def test_hlae_that_cannot_start_the_game_without_an_anti_cheat_is_remembered(hlae_env):
+    settings, demo, tmp_path = hlae_env
+
+    def refused(command, **kwargs):
+        raise launcher.LoaderFailed("HLAE could not start the game (exit code 1).")
+
+    result = IngameRenderer(settings, run_loader=refused, run_game=FakeGame(settings),
+                            resolve_slots=lambda d, t: {STEAM_A: 6}, is_cs2_running=lambda: False,
+                            is_steam_running=lambda: True, find_dialog=lambda marker: None,
+                            anti_cheats=lambda: []).render(make_job(demo, tmp_path, CLIP))
+    assert result.details["backend"] == "startmovie" and "newer HLAE" in result.details["warnings"][0]
+    assert "2.193.1|1.42.0.1" in json.loads(_failures(settings).read_text())
+
+
+def test_running_anti_cheats_names_each_one_once():
+    assert real_running_anti_cheats({"faceitclient.exe", "faceitservice.exe", "steam.exe"}) == FACEIT
+    assert real_running_anti_cheats({"steam.exe", "faceit.exe"}) == []  # the FACEIT app alone does not block
+    assert real_running_anti_cheats(set()) == []
 
 
 def test_a_backend_asked_for_by_name_is_not_swapped(hlae_env):
