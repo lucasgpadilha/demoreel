@@ -59,15 +59,31 @@ and *edit* its highlights.
 
 ## Quick start
 
-Requirements: [uv](https://docs.astral.sh/uv/) (it brings its own Python). ffmpeg is bundled.
+Requirements: Windows or Linux (macOS is not supported), [git](https://git-scm.com/downloads) and
+[uv](https://docs.astral.sh/uv/). uv downloads its own Python and the dependencies, so the first run needs
+internet. ffmpeg is bundled. On Linux the video drawing (skia) also needs three system libraries, which minimal
+servers and WSL lack (without them `uv sync` works and the first video fails):
 
 ```bash
-git clone <this-repo> demoreel && cd demoreel
+sudo apt-get install -y libgl1 libegl1 libfontconfig1   # Debian / Ubuntu
+```
+
+```bash
+git clone https://github.com/lucasgpadilha/demoreel && cd demoreel
 uv sync
 uv run demoreel serve
 ```
 
 Open <http://127.0.0.1:8000>, drop a demo, watch the highlights. API docs live at `/docs`.
+
+- Demos: CS2 `.dem`, also compressed as `.gz`, `.bz2` or `.zip`; `.zst` only when the server runs Python 3.14+
+  (the clone pins 3.13). CS:GO demos are refused.
+- The first 2D video downloads the map images ([Renderers](#renderers)); afterwards nothing is downloaded.
+- First-person recording also needs CS2 through Steam, a GPU and the CS Demo Manager playback plugin, a
+  third-party binary (MIT) that demoreel does not ship and that you download yourself:
+  [docs/ingame-recording.md](docs/ingame-recording.md).
+- In Windows PowerShell, type `curl.exe` for the `curl` examples below (`curl` is another command there).
+- `GET /health` answers with the running `version`.
 
 No server, just the terminal:
 
@@ -123,9 +139,10 @@ claude mcp add demoreel -- uv run --directory /path/to/demoreel demoreel mcp
 ```
 
 Tools: `list_matches`, `get_match`, `get_player_stats`, `list_rounds`, `get_round`, `search_kills`,
-`list_highlights`, `get_highlight`, `create_highlight`, `edit_highlight`, `delete_highlight`,
-`render_highlight`, `render_reel`, `get_job`, `get_render`, `cancel_job`, `get_feed`, `list_source_matches`,
-`import_matches`, `import_demo`, `produce_match`, `get_brand`, `get_capabilities`,
+`list_highlights`, `get_highlight`, `set_featured`, `rescore_match`, `create_highlight`, `set_category`,
+`edit_highlight`, `delete_highlight`, `render_highlight`, `render_reel`, `get_job`, `get_render`, `cancel_job`,
+`get_feed`, `list_source_matches`, `import_matches`, `import_demo`, `produce_match`, `get_brand`,
+`list_workers`, `get_capabilities`,
 `list_nights`, `get_rivalries`, `get_player_profile`, `get_weapon_rankings`, `get_trophies`,
 `get_chat_rankings` (insights across matches: who owns whom, who kills the most with each weapon, each night's
 trophies, the cry-baby ranking of the chat — see
@@ -233,4 +250,15 @@ demoreel is not affiliated with Valve. Counter-Strike is a trademark of Valve Co
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). Notes on what it is used with:
+
+- **demoparser2** is MIT-licensed in [its repository](https://github.com/LaihoE/demoparser); its PyPI package
+  carries no licence metadata, so licence scanners report it as unknown.
+- The optional `postgres` extra installs **psycopg**, which is LGPL-3.0. demoreel only imports it as a library
+  (nothing of it is copied into this repository); SQLite, the default, needs nothing of the kind.
+- **ffmpeg binaries are GPL.** The ffmpeg bundled by `imageio-ffmpeg` (BSD) is built with x264, and the Docker
+  image installs Debian's ffmpeg; both are GPL. That does not change the licence of demoreel's code, but whoever
+  *distributes* a Docker image (or another bundle) of demoreel distributes GPL binaries and must follow the GPL
+  for them.
+- None of these is shipped here: radar images (Valve assets) are downloaded on first use, the CS Demo Manager
+  plugin binary and HLAE by the user.
