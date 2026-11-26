@@ -46,3 +46,7 @@ uv run demoreel publish --dry-run  # what would go to the read-only mirror (docs
 - Error messages are read by end users and by LLM agents: state what was wrong and what is valid.
 - Only permissively licensed code (MIT/BSD/Apache-2.0), with attribution. cs2-highlights-maker (no licence),
   CS2-insight-agent (non-commercial) and cs-demodesk (AGPL) are references for ideas only — no code.
+  That rule is about code copied into this repository. Dependencies are used as libraries: demoparser2 is MIT
+  (its package has no licence metadata), the optional `postgres` extra pulls psycopg (LGPL-3.0), and the ffmpeg
+  binaries of imageio-ffmpeg and of the Docker image are GPL, which binds whoever distributes an image, not the
+  code. The README's License section says this for users; keep both in step when a dependency changes.
