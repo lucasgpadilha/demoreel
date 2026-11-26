@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, Field
 
-from .analysis.schema import HighlightSegment
+from .analysis.schema import HighlightSegment, SegmentCamera
 
 # The database stores naive UTC timestamps; the API always states the offset so clients cannot misread them.
 UTCDateTime = Annotated[datetime, AfterValidator(lambda d: d.replace(tzinfo=UTC) if d.tzinfo is None else d)]
@@ -204,7 +204,16 @@ class OpSetRange(BaseModel):
 class OpSetPov(BaseModel):
     op: Literal["set_pov"]
     segment: int | None = Field(None, description="Segment index, or null for every segment.")
-    steamid: str | None = Field(description="Player to watch; null = free overview camera.")
+    steamid: str | None = Field(description="Player to watch; null = free overview camera. Either way a fixed "
+                                            "camera on the segment is removed.")
+
+
+class OpSetCamera(BaseModel):
+    op: Literal["set_camera"]
+    segment: int | None = Field(None, description="Segment index, or null for every segment.")
+    camera: SegmentCamera | None = Field(description=(
+        "Film the segment from this fixed position {x, y, z, pitch, yaw} (what CS2's `spec_pos` prints) instead "
+        "of a player: the segment's pov_steamid is cleared. null removes the camera (free overview camera)."))
 
 
 class OpSetSpeed(BaseModel):
@@ -224,6 +233,8 @@ class OpAddSegment(BaseModel):
     start_tick: int
     end_tick: int
     pov_steamid: str | None = None
+    camera: SegmentCamera | None = Field(None, description="A fixed position instead of a player (leave "
+                                                           "pov_steamid empty).")
     speed: float = Field(1.0, gt=0, le=8)
     caption: str | None = None
     index: int | None = Field(None, description="Insert position; default = append.")
@@ -255,7 +266,7 @@ class OpSetMeta(BaseModel):
 
 EditOp = Annotated[
     OpTrim | OpSetRange | OpSetPov | OpSetSpeed | OpSetCaption | OpAddSegment | OpRemoveSegment | OpMoveSegment
-    | OpSplitSegment | OpSetMeta,
+    | OpSplitSegment | OpSetMeta | OpSetCamera,
     Field(discriminator="op"),
 ]
 

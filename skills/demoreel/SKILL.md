@@ -72,9 +72,11 @@ first-person videos; `set_featured(highlight_id, featured=true)` promotes one. R
 (segments, kill ticks, renders) before changing a clip.
 
 **Edit a clip.** `edit_highlight(highlight_id, ops)` applies a list of operations, all or nothing: `trim`,
-`set_range`, `set_pov`, `set_speed` (0.5 = slow motion), `set_caption`, `add_segment`, `remove_segment`,
-`move_segment`, `split_segment`, `set_meta`. Slow motion on a final kill: split the segment just before it and
-set the second part to 0.3-0.5. Videos already made are kept and flagged `stale`; render again.
+`set_range`, `set_pov`, `set_camera`, `set_speed` (0.5 = slow motion), `set_caption`, `add_segment`,
+`remove_segment`, `move_segment`, `split_segment`, `set_meta`. Slow motion on a final kill: split the segment
+just before it and set the second part to 0.3-0.5. `set_pov` puts a segment on a player (or the free camera)
+and `set_camera` on a fixed spot; each replaces the other, and `add_segment` takes either. Videos already made
+are kept and flagged `stale`; render again.
 
 **Make a clip by hand.** `create_highlight(match_id, ...)` takes explicit `segments`, or `start_tick` +
 `end_tick` (+ `pov`), or `round_number` + `player` to clip that player's kills in that round.

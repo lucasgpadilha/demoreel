@@ -259,7 +259,8 @@ def validate_segments(match: Match, segments: list[HighlightSegment]) -> list[Hi
             raise ServiceError(f"Segment {i}: must be at least 0.25s long (end_tick must be > start_tick).")
         if seg.camera is not None and seg.pov_steamid is not None:
             raise ServiceError(f"Segment {i}: give either pov_steamid (a player's eyes) or camera (a fixed "
-                               "position), not both.")
+                               "position), not both. The edit operations set_pov and set_camera replace one "
+                               "with the other.")
         if seg.pov_steamid is not None and seg.pov_steamid not in known:
             raise ServiceError(f"Segment {i}: pov_steamid {seg.pov_steamid!r} is not a player of this match. "
                                f"Players: {sorted(known)}")
@@ -587,9 +588,14 @@ def edit_highlight(s: Session, highlight_id: str, req: EditRequest) -> Highlight
             elif op.op == "set_range":
                 seg = at(op.segment)
                 seg.start_tick, seg.end_tick = op.start_tick, op.end_tick
-            elif op.op == "set_pov":
+            elif op.op == "set_pov":  # a player, or the free camera: in both cases no fixed camera any more
                 for seg in (segs if op.segment is None else [at(op.segment)]):
-                    seg.pov_steamid = op.steamid
+                    seg.pov_steamid, seg.camera = op.steamid, None
+            elif op.op == "set_camera":  # a fixed spot instead of a player; null = back to the free camera
+                for seg in (segs if op.segment is None else [at(op.segment)]):
+                    seg.camera = op.camera.model_copy() if op.camera is not None else None
+                    if op.camera is not None:
+                        seg.pov_steamid = None
             elif op.op == "set_speed":
                 for seg in (segs if op.segment is None else [at(op.segment)]):
                     seg.speed = op.speed
@@ -597,7 +603,7 @@ def edit_highlight(s: Session, highlight_id: str, req: EditRequest) -> Highlight
                 at(op.segment).caption = op.caption
             elif op.op == "add_segment":
                 new = HighlightSegment(start_tick=op.start_tick, end_tick=op.end_tick, pov_steamid=op.pov_steamid,
-                                       speed=op.speed, caption=op.caption)
+                                       camera=op.camera, speed=op.speed, caption=op.caption)
                 segs.insert(len(segs) if op.index is None else max(0, min(op.index, len(segs))), new)
             elif op.op == "remove_segment":
                 at(op.segment)

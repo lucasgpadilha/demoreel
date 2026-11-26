@@ -23,7 +23,7 @@ Base URL: {BASE_URL}
    - `GET /api/v1/matches/{id}/analysis` — everything in one (large) document
    - `GET /api/v1/matches/{id}/highlights` — best first, each with its rendered videos (`video_url`)
 4. Edit a highlight: `POST /api/v1/highlights/{id}/edit` with `{"ops": [...]}` (all-or-nothing):
-   `trim`, `set_range`, `set_pov`, `set_speed`, `set_caption`, `add_segment`, `remove_segment`,
+   `trim`, `set_range`, `set_pov`, `set_camera`, `set_speed`, `set_caption`, `add_segment`, `remove_segment`,
    `move_segment`, `split_segment`, `set_meta`. Or create one: `POST /api/v1/matches/{id}/highlights`.
 5. Render: `POST /api/v1/highlights/{id}/renders` `{"renderer": "auto" | "radar" | "ingame"}` → 202
    `{render, job}`; long-poll the job; then `GET /api/v1/renders/{id}` → `video_url`.

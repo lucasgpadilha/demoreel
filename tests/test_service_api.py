@@ -707,6 +707,33 @@ def test_a_segment_can_be_watched_from_a_fixed_camera(client, match_id):
     assert both.status_code == 400 and "not both" in both.json()["detail"]
     assert client.post(f"{base}/highlights", json={"segments": [{**span, "camera": {"x": 1}}]}).status_code == 422
 
+
+CAM = {"x": -324.4, "y": -8.2, "z": 506.0, "pitch": 38.2, "yaw": -121.3}
+
+
+def test_edit_operations_switch_a_segment_between_a_player_and_a_fixed_camera(client, match_id):
+    hid = first_highlight(match_id)
+    seg = edit(hid, {"op": "remove_segment", "segment": 1}).segments[0]  # keep only the play itself
+    player, span = seg.pov_steamid, {"start_tick": seg.start_tick, "end_tick": seg.end_tick}
+    out = edit(hid, {"op": "set_camera", "segment": 0, "camera": CAM})
+    assert out.segments[0].camera.model_dump() == CAM and out.segments[0].pov_steamid is None
+    out = edit(hid, {"op": "set_pov", "segment": 0, "steamid": player})  # back to the player: no "not both"
+    assert out.segments[0].pov_steamid == player and out.segments[0].camera is None
+    out = edit(hid, {"op": "add_segment", **span, "camera": CAM, "index": 0})
+    assert out.segments[0].camera.model_dump() == CAM and out.segments[1].pov_steamid == player
+    out = edit(hid, {"op": "set_camera", "segment": 0, "camera": None})
+    assert out.segments[0].camera is None and out.segments[0].pov_steamid is None
+    out = edit(hid, {"op": "set_camera", "segment": None, "camera": CAM})
+    assert all(s.camera is not None and s.pov_steamid is None for s in out.segments)
+    out = edit(hid, {"op": "set_pov", "segment": None, "steamid": None})  # the free camera everywhere
+    assert all(s.camera is None and s.pov_steamid is None for s in out.segments)
+    with pytest.raises(service.ServiceError) as err:
+        edit(hid, {"op": "add_segment", **span, "camera": CAM, "pov_steamid": player})
+    assert "not both" in err.value.message and "set_camera" in err.value.message
+    r = client.post(f"/api/v1/highlights/{hid}/edit", json={"ops": [{"op": "set_camera", "segment": 0, "camera": CAM}]})
+    assert r.status_code == 200 and r.json()["segments"][0]["camera"] == CAM
+
+
 def test_render_request_carries_its_format(client, match_id):
     hid = first_highlight(match_id)
     r = client.post(f"/api/v1/highlights/{hid}/renders", json={"renderer": "radar", "options": {"format": "9:16"}})

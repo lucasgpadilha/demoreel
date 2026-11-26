@@ -36,7 +36,8 @@ demoreel analyzes Counter-Strike 2 demos and produces highlight videos.
 Concepts
 - match: one uploaded demo. `get_match` returns the scoreboard and its best highlights.
 - highlight: an editable clip definition = ordered `segments`, each {start_tick, end_tick, pov_steamid, speed,
-  caption}. Ticks are demo ticks; seconds = ticks / tickrate (64 for CS2).
+  caption}, or a fixed `camera` {x, y, z, pitch, yaw} instead of pov_steamid (filmed by the in-game renderer
+  only). Ticks are demo ticks; seconds = ticks / tickrate (64 for CS2).
 - render: a video file produced from one highlight (or several = a "reel"). Renders are asynchronous: tools
   return a `job_id`; call `get_job(job_id, wait_seconds=30)` until `done` is true, then read `video_url`.
 - Editing a highlight never changes existing videos; they are flagged `stale`. Render again to see the edit.
@@ -304,9 +305,12 @@ def build_server() -> MCPServer:
     @mcp.tool(annotations=WRITE, description=(
         "Edit a highlight with a list of operations applied in order (all-or-nothing). Operations: "
         "trim{segment,start_delta_s,end_delta_s} · set_range{segment,start_tick,end_tick} · "
-        "set_pov{segment|null,steamid} · set_speed{segment|null,speed} · set_caption{segment,caption} · "
-        "add_segment{start_tick,end_tick,pov_steamid,speed,caption,index} · remove_segment{segment} · "
-        "move_segment{segment,to} · split_segment{segment,at_tick} · set_meta{title,description,tags}. "
+        "set_pov{segment|null,steamid|null} (a player, or null = free camera; removes a fixed camera) · "
+        "set_camera{segment|null,camera|null} (camera = {x,y,z,pitch,yaw} from CS2's spec_pos: film from that "
+        "fixed spot instead of a player; null removes it) · set_speed{segment|null,speed} · "
+        "set_caption{segment,caption} · add_segment{start_tick,end_tick,pov_steamid|camera,speed,caption,index} · "
+        "remove_segment{segment} · move_segment{segment,to} · split_segment{segment,at_tick} · "
+        "set_meta{title,description,tags}. "
         "Segment indexes are 0-based. Example slow-motion on the last second of segment 0 that ends at tick "
         "5000: [{op:'split_segment',segment:0,at_tick:4936},{op:'set_speed',segment:1,speed:0.5}]. "
         "Call render_highlight afterwards to produce the new video."))

@@ -72,17 +72,21 @@ Also: prompt `make_highlight_reel(match_id, player?)` and resource `demoreel://m
 ```jsonc
 {"op": "trim", "segment": 0, "start_delta_s": 1.0, "end_delta_s": -0.5}   // seconds; negative start = earlier
 {"op": "set_range", "segment": 0, "start_tick": 74201, "end_tick": 74782}
-{"op": "set_pov", "segment": null, "steamid": "7656…"}                    // null segment = all; null steamid = overview
+{"op": "set_pov", "segment": null, "steamid": "7656…"}                    // null segment = all; null steamid = overview; removes a fixed camera
+{"op": "set_camera", "segment": 0, "camera": {"x": -324.4, "y": -8.2, "z": 506.0, "pitch": 38.2, "yaw": -121.3}}
+                                                                          // film from that spot (clears the player); null camera = overview
 {"op": "set_speed", "segment": 1, "speed": 0.5}                           // 0.5 = slow motion
 {"op": "set_caption", "segment": 1, "caption": "1v2"}
-{"op": "add_segment", "start_tick": 8000, "end_tick": 8200, "pov_steamid": "7656…", "index": 0}
+{"op": "add_segment", "start_tick": 8000, "end_tick": 8200, "pov_steamid": "7656…", "index": 0}  // or "camera": {…}
 {"op": "remove_segment", "segment": 2}
 {"op": "move_segment", "segment": 2, "to": 0}
 {"op": "split_segment", "segment": 0, "at_tick": 74560}
 {"op": "set_meta", "title": "…", "description": "…", "tags": ["…"]}
 ```
 
-Limits: ≤ 40 segments, ≤ 300 s per highlight, each segment ≥ 0.25 s and inside the demo.
+Limits: ≤ 40 segments, ≤ 300 s per highlight, each segment ≥ 0.25 s and inside the demo. A segment is
+watched from a player or from a fixed camera, never both (`spec_pos` in the CS2 console prints the camera's
+five numbers).
 
 ## Example session
 
