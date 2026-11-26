@@ -286,7 +286,7 @@ def _start(command: Sequence[str], env: Mapping[str, str] | None, cwd: Path | No
 def run_game(command: Sequence[str], *, env: Mapping[str, str] | None = None, cwd: Path | None = None,
              timeout_s: float, cancelled: Callable[[], bool] = lambda: False,
              on_poll: Callable[[float], None] = lambda elapsed: None, log_path: Path | None = None,
-             poll_s: float = 0.5, kill_names: Sequence[str] = (),
+             poll_s: float = 0.5, kill_names: Sequence[str] = (), kill_marker: str | None = None,
              contain: Callable[[], procs.Containment] = procs.DieWithParent) -> GameRun:
     """Start ``command`` and wait for it to exit.
 
@@ -325,7 +325,7 @@ def run_game(command: Sequence[str], *, env: Mapping[str, str] | None = None, cw
                 time.sleep(poll_s)
         except BaseException:
             container.kill()
-            procs.kill_process_tree(proc, also_names=kill_names)
+            procs.kill_process_tree(proc, also_names=kill_names, only_with=kill_marker)
             raise
     finally:
         container.close()
@@ -337,7 +337,7 @@ def run_game(command: Sequence[str], *, env: Mapping[str, str] | None = None, cw
 def run_loader(command: Sequence[str], *, env: Mapping[str, str] | None = None, cwd: Path | None = None,
                timeout_s: float, cancelled: Callable[[], bool] = lambda: False,
                on_poll: Callable[[float], None] = lambda elapsed: None, log_path: Path | None = None,
-               poll_s: float = 1.0, kill_names: Sequence[str] = (),
+               poll_s: float = 1.0, kill_names: Sequence[str] = (), kill_marker: str | None = None,
                is_game_running: Callable[[], bool | None] = procs.is_cs2_running,
                appear_timeout_s: float = 120.0,
                contain: Callable[[], procs.Containment] = procs.DieWithParent) -> GameRun:
@@ -379,7 +379,7 @@ def run_loader(command: Sequence[str], *, env: Mapping[str, str] | None = None, 
                 time.sleep(poll_s)
         except BaseException:
             container.kill()
-            procs.kill_process_tree(proc, also_names=kill_names)
+            procs.kill_process_tree(proc, also_names=kill_names, only_with=kill_marker)
             raise
     finally:
         container.close()

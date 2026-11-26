@@ -20,6 +20,7 @@ Per-job knobs in ``RenderOptions.extra`` (all optional): ``ingame_hud`` ("deathn
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shlex
@@ -53,6 +54,9 @@ HLAE_ENCODERS = {
 }
 MIN_FREE_BYTES = 2 * 1024**3
 DISK_HEADROOM_BYTES = 1024**3
+GAME_EXIT_WAIT_S = 30.0  # after a launch, how long the game may take to be gone before its files are touched
+
+log = logging.getLogger("demoreel.ingame")
 
 
 class _GameDidNotQuit(RenderError):
@@ -460,6 +464,14 @@ class IngameRenderer:
         game_seconds = 0.0  # all launches
         has_layer = False  # the Vulkan layer of the plugin (Linux), as installed for the last launch
 
+        # CS2 fails on paths outside ASCII (CS Demo Manager checks the demo's): the private config folder and
+        # HLAE's output folder reach the game as well.
+        for what, path in (("its private config folder (USRLOCALCSGO)", settings.cfg_dir),
+                           *((("HLAE's output folder", hlae_dir),) if hlae else ())):
+            if not launcher.is_basic_latin(str(path)):
+                raise RenderError(f"CS2 cannot use {what}, {path}: its path has characters outside ASCII. Move "
+                                  "the demoreel data folder (DEMOREEL_DATA_DIR) - or, for `demoreel render`, the "
+                                  "output file - to a path without accents or special characters.")
         settings.cfg_dir.mkdir(parents=True, exist_ok=True)
         game_args = launcher.build_launch_args(staged.path, width, height,
                                                _string_list(extra.get("ingame_launch_args")))
@@ -493,18 +505,26 @@ class IngameRenderer:
             if number == 1:
                 job.progress(0.05, "Starting CS2")
             run: launcher.GameRun | None = None
+            gone = True
             with plugin.plugin_session(settings, binary) as installed:
                 try:
                     run = (self._run_loader if hlae else self._run_game)(
                         command, env=launcher.build_env(settings, installed.env), timeout_s=timeout_s,
                         cancelled=job.cancelled, on_poll=on_poll, log_path=job.work_dir / "cs2-output.log",
-                        kill_names=procs.CS2_PROCESS_NAMES)
+                        kill_names=procs.CS2_PROCESS_NAMES, kill_marker=str(staged.path))
                 except _GameDidNotQuit as exc:
                     warnings.append(str(exc))
-                # gameinfo.gi and the plugin's settings file are restored and the plugin removed when this
-                # block ends: let the game go first (the plugin writes its settings once more on shutdown).
-                wait_until_gone(self._is_cs2_running)
+                finally:
+                    # gameinfo.gi and the plugin's settings file are restored and the plugin removed when this
+                    # block ends - also when the game was just killed: let it go first (the plugin writes its
+                    # settings once more on shutdown, and Windows keeps server.dll locked while it runs).
+                    gone = wait_until_gone(self._is_cs2_running, GAME_EXIT_WAIT_S)
+                    if not gone:
+                        log.warning("CS2 was still running %.0f s after the recording ended", GAME_EXIT_WAIT_S)
                 has_layer = installed.vulkan_layer_installed
+            if not gone:
+                warnings.append(f"CS2 was still closing {GAME_EXIT_WAIT_S:.0f} s after recording; what it kept "
+                                "locked in the CS2 folder is removed the next time demoreel starts.")
             if run is not None and run.returncode != 0 and run.duration_s < 2.0:
                 raise RenderError(f"CS2 failed to start (exit code {run.returncode}). {run.output_tail[-600:]}")
             if run is not None:
@@ -512,7 +532,7 @@ class IngameRenderer:
                 game = run
 
         # 4. Encode ----------------------------------------------------------------------------------------
-        swap =_flag(extra, "ingame_swap_red_blue", settings.is_linux and not has_layer)
+        swap = _flag(extra, "ingame_swap_red_blue", settings.is_linux and not has_layer)
         try:
             if hlae:
                 encoded = encode.mux_hlae_takes(
@@ -642,8 +662,12 @@ class IngameRenderer:
         return on_poll
 
 
-def wait_until_gone(is_running: Callable[[], bool | None], timeout_s: float = 10.0) -> None:
-    """Small helper for callers that need the game process to be really gone before touching its files."""
+def wait_until_gone(is_running: Callable[[], bool | None], timeout_s: float = 10.0) -> bool:
+    """Wait for the game process to be really gone before touching its files. ``False`` when it was still
+    there after ``timeout_s``."""
     deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline and is_running():
+    while is_running():
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(0.25)
+    return True

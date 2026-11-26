@@ -79,6 +79,24 @@ def test_closing_the_game_never_touches_a_server(monkeypatch):
     assert all(str(SERVER.pid) not in c and str(UNKNOWN.pid) not in c for c in commands)
 
 
+def test_closing_the_recording_never_closes_a_game_somebody_opened_meanwhile(monkeypatch):
+    """Between the "is CS2 open?" check and the end of a recording, the machine's owner may start the game: a
+    timeout or a cancel must close the recording's game only, told apart by the demo it plays."""
+    theirs = procs.GameProcess(21, GAME.exe, r'"C:\Steam\steamapps\common\cs2\game\bin\win64\cs2.exe" -steam')
+    ours = procs.GameProcess(22, GAME.exe, r'"C:\Steam\...\cs2.exe" -insecure +playdemo '
+                                           r'"C:\demoreel\data\tmp\j_1\ingame\demo.dem" -sw')
+    killed: list[int] = []
+    monkeypatch.setattr(procs, "cs2_processes", lambda: [SERVER, theirs, ours])
+    monkeypatch.setattr(procs, "_kill_pid", killed.append)
+    monkeypatch.setattr(procs.os, "killpg", lambda *a: None, raising=False)
+    monkeypatch.setattr(procs.os, "getpgid", lambda pid: pid, raising=False)
+    monkeypatch.setattr(procs.subprocess, "run", lambda cmd, **kw: None)
+    procs.kill_process_tree(_Proc(), also_names=procs.CS2_PROCESS_NAMES,
+                            only_with="C:/demoreel/data/tmp/j_1/ingame/demo.dem")  # either kind of slash
+    assert killed == [22]
+    assert procs.game_pids() == [21, 22] and procs.game_pids("nothing.dem") == []
+
+
 def test_command_lines_of_real_processes_can_be_read():
     exe, command_line = procs.process_details(os.getpid())
     assert exe and command_line and ("pytest" in command_line or "python" in command_line.lower())

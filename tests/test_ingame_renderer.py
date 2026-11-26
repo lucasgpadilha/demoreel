@@ -92,7 +92,7 @@ class FakeGame:
             "plugin_installed": (plugin.plugin_bin_dir(self.settings)
                                  / plugin.installed_binary_name(self.settings.platform)).is_file(),
             "backup_exists": plugin.backup_path(self.settings.gameinfo_path).is_file(),
-            "demo_bytes": demo.read_bytes(),
+            "demo_bytes": demo.read_bytes(), "kill_names": kill_names, **kwargs,
         })
         if self.write:
             tga_dir = encode.tga_recording_dir(self.settings) / "2026_11_14"
@@ -304,6 +304,55 @@ def test_a_take_that_came_out_short_counts_with_the_frames_it_has(env):
     assert [s["frames"] for s in result.details["spans"]] == [26, 30]
     assert result.details["frames"] == 56 and result.details["expected_frames"] == 60
     assert result.duration_s == pytest.approx(56 / 30)
+
+
+def test_only_the_game_of_this_recording_may_be_closed(env):
+    settings, demo, tmp_path = env
+    add_plugin(settings)
+    game = FakeGame(settings)
+    renderer_for(settings, game).render(make_job(demo, tmp_path, [Clip(segments=[ClipSegment(8000, 8032, STEAM_A)])]))
+    (call,) = game.calls
+    assert call["kill_marker"] == call["command"][call["command"].index("+playdemo") + 1]
+
+
+def test_the_plugin_is_removed_only_once_the_game_is_gone(env, monkeypatch):
+    """After a kill the game takes a moment to go, and Windows keeps server.dll locked meanwhile."""
+    from demoreel.render.ingame import renderer as renderer_module
+
+    settings, demo, tmp_path = env
+    add_plugin(settings)
+    running = {"now": False, "polls": 0}
+
+    def is_running():
+        running["polls"] += 1
+        return running["now"]
+
+    class SlowToClose(FakeGame):
+        def __call__(self, command, **kwargs):
+            out = super().__call__(command, **kwargs)
+            running["now"] = True  # still closing after the run returned
+            return out
+
+    monkeypatch.setattr(renderer_module, "GAME_EXIT_WAIT_S", 0.3)
+    renderer = IngameRenderer(settings, run_game=SlowToClose(settings), resolve_slots=lambda d, t: {STEAM_A: 6},
+                              is_cs2_running=is_running, is_steam_running=lambda: True)
+    result = renderer.render(make_job(demo, tmp_path, [Clip(segments=[ClipSegment(8000, 8032, STEAM_A)])]))
+    assert running["polls"] > 2  # it was waited for...
+    assert any("still closing" in w for w in result.details["warnings"])  # ...and the result says it was late
+    assert settings.gameinfo_path.read_bytes() == GAMEINFO
+
+
+def test_folders_with_characters_outside_ascii_are_refused_before_the_game_starts(env):
+    from dataclasses import replace
+
+    settings, demo, tmp_path = env
+    add_plugin(settings)
+    accented = replace(settings, data_dir=tmp_path / "Lançamentos" / "data" / "ingame")
+    game = FakeGame(accented)
+    with pytest.raises(RenderError, match="outside ASCII") as excinfo:
+        renderer_for(accented, game).render(make_job(demo, tmp_path, [Clip(segments=[ClipSegment(8000, 8032)])]))
+    assert "DEMOREEL_DATA_DIR" in str(excinfo.value) and game.calls == []
+    assert settings.gameinfo_path.read_bytes() == GAMEINFO
 
 
 def test_render_restores_everything_when_the_game_wrote_nothing(env):

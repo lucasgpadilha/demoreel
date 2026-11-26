@@ -228,10 +228,19 @@ def dedicated_servers() -> list[GameProcess]:
     return [p for p in cs2_processes() or [] if p.dedicated is True]
 
 
-def game_pids() -> list[int]:
+def _comparable(text: str) -> str:
+    return text.replace("\\", "/").replace('"', "").lower()
+
+
+def game_pids(marker: str | None = None) -> list[int]:
     """Process ids that are certainly the game: ``cs2`` processes whose command line was read and is not a
-    dedicated server's. What cannot be inspected is left out - and so never killed."""
-    return [p.pid for p in cs2_processes() or [] if p.dedicated is False]
+    dedicated server's. What cannot be inspected is left out - and so never killed.
+
+    ``marker``: only games whose command line contains it (a recording passes the path of the demo it plays,
+    which is unique to its job), so a game somebody opened meanwhile is not taken for the recording's."""
+    wanted = _comparable(marker) if marker else None
+    return [p.pid for p in cs2_processes() or [] if p.dedicated is False
+            and (wanted is None or wanted in _comparable(p.command_line or ""))]
 
 
 def popen_group_kwargs() -> dict:
@@ -411,13 +420,15 @@ def _kill_pid(pid: int) -> None:
         os.kill(pid, signal.SIGKILL)
 
 
-def kill_process_tree(proc: subprocess.Popen, also_names: Iterable[str] = ()) -> None:
+def kill_process_tree(proc: subprocess.Popen, also_names: Iterable[str] = (), only_with: str | None = None) -> None:
     """Kill ``proc`` and its descendants. ``also_names`` are image names killed afterwards as a safety net
     (a loader such as HLAE starts the game and exits; on Linux the game runs inside the Steam runtime container
     and may outlive the wrapper script).
 
     For the game's own name that safety net is narrowed to the game: dedicated servers running under the same
-    image name, and any ``cs2`` process that cannot be inspected, are left alone."""
+    image name, and any ``cs2`` process that cannot be inspected, are left alone; with ``only_with`` (the demo
+    the recording plays) also every game that was not started with it - demoreel never closes a game it did
+    not start."""
     try:
         if sys.platform == "win32":
             subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=30,
@@ -436,7 +447,7 @@ def kill_process_tree(proc: subprocess.Popen, also_names: Iterable[str] = ()) ->
     for name in also_names:
         try:
             if name.lower() in CS2_PROCESS_NAMES:
-                for pid in game_pids():
+                for pid in game_pids(only_with):
                     try:
                         _kill_pid(pid)
                     except Exception:  # noqa: BLE001 - already gone
