@@ -508,8 +508,11 @@ def cancel_job(job_id: str) -> JobOut:
 
 # ------------------------------------------------------------------------------------------- webhooks
 
-@api.get("/webhooks", response_model=list[WebhookOut], tags=["webhooks"], summary="Registered webhooks")
-def list_webhooks() -> list[WebhookOut]:
+@api.get("/webhooks", response_model=list[WebhookOut], tags=["webhooks"],
+         summary="Registered webhooks (organiser only)")
+def list_webhooks(request: Request) -> list[WebhookOut]:
+    if not is_admin(request):  # a Discord or Slack webhook address is a password: whoever has it posts there
+        raise HTTPException(403, "Only the organiser can see the webhooks (send the organiser's key).")
     with session_scope() as s:
         return [WebhookOut(id=w.id, url=w.url, events=w.events or [], active=bool(w.active), created_at=w.created_at)
                 for w in s.scalars(select(Webhook)).all()]
