@@ -20,6 +20,11 @@ demos/
 *.dem.zip
 *.dem.bz2
 *.dem.gz
+*.dem.zst
+
+# The CS2 playback plugin (and any other native binary) is downloaded by the user, never committed
+*.dll
+*.so
 
 # Env / editor
 .env

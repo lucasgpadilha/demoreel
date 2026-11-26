@@ -191,7 +191,12 @@ def test_the_plugin_manifests_point_at_the_skill_and_the_local_mcp_endpoint():
 
 
 def test_dist_is_ignored_by_git():
-    assert "dist/" in (ROOT / ".gitignore").read_text(encoding="utf-8").split()
+    ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").split()
+    assert "dist/" in ignored
+    # demos (player names, SteamIDs) in every packing, and native binaries such as the CS2 playback plugin
+    assert {"*.dem", "*.dem.zip", "*.dem.bz2", "*.dem.gz", "*.dem.zst", "*.dll", "*.so", "data/"} <= set(ignored)
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+    assert "* text=auto eol=lf" in attributes and "*.woff2 binary" in attributes and "*.ttf binary" in attributes
 
 
 @pytest.mark.parametrize(("frontmatter", "message"), [

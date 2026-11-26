@@ -1,0 +1,26 @@
+# Text is stored with LF and checked out with LF on every platform, whatever core.autocrlf says, so a commit
+# from Windows never rewrites whole files.
+* text=auto eol=lf
+
+# cmd.exe scripts keep their CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binaries: never converted, never diffed as text.
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.mp3 binary
+*.ogg binary
+*.wav binary
+*.mp4 binary
+*.zip binary
+*.gz binary
+*.dem binary
