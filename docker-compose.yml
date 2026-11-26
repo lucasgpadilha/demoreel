@@ -7,6 +7,8 @@
 #      organiser change things; DEMOREEL_API_KEY closes everything to whoever lacks it;
 #   2. set DEMOREEL_PUBLIC_URL to the address people will use (links and the accepted host name follow it);
 #   3. publish "8000:8000" (or put a reverse proxy in front, see docs/hosting.md).
+# The image sets DEMOREEL_ALLOW_OPEN=1 so `demoreel serve` starts keyless inside the container, which listens on
+# 0.0.0.0; that is safe only with the port published on 127.0.0.1 as below. With a key set it is not needed.
 services:
   demoreel:
     build: .

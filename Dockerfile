@@ -5,10 +5,13 @@ FROM python:3.13-slim
 # Inside the container the server listens on every interface; what reaches it is decided by the published
 # port (docker-compose.yml: this machine only). The public URL names the host the server answers to while no
 # key is set: change it to the address people use when you expose the port (with a key, see the compose file).
+# `demoreel serve` refuses to listen beyond the machine without a key; DEMOREEL_ALLOW_OPEN=1 lets it start here
+# keyless only because the compose file publishes the port on 127.0.0.1. Before publishing it to other
+# machines, set DEMOREEL_ADMIN_KEY or DEMOREEL_API_KEY (docker-compose.yml says how).
 ENV PYTHONUNBUFFERED=1 PYTHONUTF8=1 \
     UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy \
     DEMOREEL_DATA_DIR=/data DEMOREEL_HOST=0.0.0.0 DEMOREEL_PORT=8000 \
-    DEMOREEL_PUBLIC_URL=http://localhost:8000
+    DEMOREEL_PUBLIC_URL=http://localhost:8000 DEMOREEL_ALLOW_OPEN=1
 
 # skia needs GL/fontconfig at import time; fonts are for the 2D renderer (names with symbols/emoji included)
 RUN apt-get update && apt-get install -y --no-install-recommends \

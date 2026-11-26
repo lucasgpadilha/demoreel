@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import multiprocessing
+import os
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -40,10 +42,11 @@ def serve(
     host: Annotated[str | None, typer.Option(help="Bind address (default: DEMOREEL_HOST or 127.0.0.1).")] = None,
     port: Annotated[int | None, typer.Option(help="Port (default: DEMOREEL_PORT or 8000).")] = None,
     workers: Annotated[int | None, typer.Option(help="Worker processes to start alongside the API. 0 = API only.")] = None,
+    i_know_it_is_open: Annotated[bool, typer.Option(
+        "--i-know-it-is-open", help="Listen beyond this machine without any key (also DEMOREEL_ALLOW_OPEN=1): "
+                                    "whoever reaches the port may change and delete everything.")] = False,
 ) -> None:
     """Start the API, the web UI, the MCP endpoint and (by default) one background worker."""
-    import os
-
     import uvicorn
 
     if host:
@@ -53,6 +56,10 @@ def serve(
     from .config import get_settings
 
     settings = get_settings()
+    refusal = open_server_refusal(settings.host, settings.keyed, i_know_it_is_open or _allow_open_env())
+    if refusal:
+        typer.secho(refusal, fg=typer.colors.RED, err=True)
+        raise typer.Exit(2)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     from .db import init_db
     from .jobs import requeue_stale, worker_process_main
@@ -73,6 +80,36 @@ def serve(
         uvicorn.run("demoreel.api:create_app", factory=True, host=settings.host, port=settings.port, log_level="info")
     finally:
         stop_workers(procs, stop)
+
+
+ALLOW_OPEN_ENV = "DEMOREEL_ALLOW_OPEN"
+
+
+def _allow_open_env() -> bool:
+    return (os.environ.get(ALLOW_OPEN_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_local_host(host: str) -> bool:
+    """Does binding ``host`` keep the server on this machine (a loopback address or ``localhost``)?"""
+    name = host.strip().strip("[]").lower()
+    if name == "localhost" or name.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False  # a host name, or 0.0.0.0 / :: (every interface)
+
+
+def open_server_refusal(host: str, keyed: bool, allowed: bool) -> str | None:
+    """Why ``serve`` must not start: listening beyond this machine with no key at all hands everyone who
+    reaches the port the organiser's rights. ``None`` when it may start."""
+    if keyed or allowed or is_local_host(host):
+        return None
+    return (f"Refusing to listen on {host} without a key: anyone who reaches this port could delete every match, "
+            "read the whole chat, register webhooks and use every MCP tool. Set DEMOREEL_ADMIN_KEY (visitors "
+            "read, only the organiser changes things) or DEMOREEL_API_KEY (everything needs the key), 16+ "
+            "characters, e.g. from `openssl rand -hex 24`; or listen on 127.0.0.1 (the default) and put a reverse "
+            f"proxy in front. To run open anyway, on a network you trust: --i-know-it-is-open or {ALLOW_OPEN_ENV}=1.")
 
 
 # How long `serve` lets its workers finish when it stops: a recording is cancelled at its next check (about a
