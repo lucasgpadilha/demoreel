@@ -29,7 +29,7 @@ import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from ..base import Clip, ClipSegment
+from ..base import Clip, ClipSegment, parse_camera_view, player_view
 
 # json-actions-file-generator.ts getValidTick(): "Commands must be executed at least ~1.5 seconds (tickrate 64)
 # after a demo_gototick 0 command because the game may skip these first ticks."
@@ -90,10 +90,12 @@ class Action:
 
 @dataclass(frozen=True)
 class CameraCut:
-    """Switch the camera to the player in ``slot`` (see ``slots.py``) at ``tick``."""
+    """Switch the camera to the player in ``slot`` (see ``slots.py``) at ``tick``, or, with ``goto``, put the
+    free camera at a fixed position ``(x, y, z, pitch, yaw)``."""
 
     tick: int
-    slot: int
+    slot: int | None
+    goto: tuple[float, float, float, float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -216,7 +218,8 @@ def plan_sequences(clips: Iterable[Clip], slot_of: SlotLookup | Mapping[str, int
                 ignored_speed = True
 
             slot: int | None = None
-            if segment.pov_steamid:
+            goto = parse_camera_view(segment.pov_steamid)
+            if player_view(segment.pov_steamid):
                 slot = lookup(str(segment.pov_steamid), start)
                 if slot is None:
                     plan.warnings.append(
@@ -226,13 +229,14 @@ def plan_sequences(clips: Iterable[Clip], slot_of: SlotLookup | Mapping[str, int
             last = plan.sequences[-1] if plan.sequences else None
             contiguous = (merge_contiguous and previous is not None and last is not None
                           and 0 <= start - last.end_tick <= 1)
+            cut = CameraCut(tick=start, slot=slot, goto=goto) if slot is not None or goto is not None else None
             if contiguous and last is not None:
                 cameras = last.cameras
-                if slot is not None and (not cameras or cameras[-1].slot != slot):
-                    cameras = (*cameras, CameraCut(tick=start, slot=slot))
+                if cut is not None and (not cameras or (cameras[-1].slot, cameras[-1].goto) != (slot, goto)):
+                    cameras = (*cameras, cut)
                 plan.sequences[-1] = RecordSequence(last.number, last.start_tick, end, cameras)
             else:
-                cameras = (CameraCut(tick=start, slot=slot),) if slot is not None else ()
+                cameras = (cut,) if cut is not None else ()
                 plan.sequences.append(RecordSequence(len(plan.sequences) + 1, start, end, cameras))
             previous = segment
     if ignored_speed:
@@ -341,16 +345,20 @@ def sequence_actions(sequence: RecordSequence, options: ActionOptions, *, is_las
     for camera in sequence.cameras:
         # addSpecPlayer: "It's important to set spec_mode before spec_player otherwise the spec_player command
         # may not work." spec_mode 1 = first person.
+        # addFocusCamera (a fixed position): "Since the 2026-10-14 CS2 update the demo free camera keeps its own
+        # position and ignores the one spec_goto teleports the observer to, so it's turned off first."
+        cmds = (["cl_demo_freecam 0", "spec_goto " + " ".join(f"{v:g}" for v in camera.goto)]
+                if camera.goto is not None else ["spec_mode 1", f"spec_player {camera.slot}"])
         if camera.tick <= sequence.start_tick:
             # Not in the reference: also aim the camera a few ticks *before* recording starts (and before the
             # pause), so the first recorded frame cannot show the previous point of view. The commands are
             # repeated on the start tick, as the reference does, in case the early ones were skipped.
             early = max(setup_tick + 1, sequence.start_tick - CAMERA_LEAD_TICKS)
             if early < camera.tick:
-                add(early, "spec_mode 1")
-                add(early, f"spec_player {camera.slot}")
-        add(camera.tick, "spec_mode 1")
-        add(camera.tick, f"spec_player {camera.slot}")
+                for cmd in cmds:
+                    add(early, cmd)
+        for cmd in cmds:
+            add(camera.tick, cmd)
 
     # Outlines for kills through smoke / walls. The setup tick switched them off; a range that is already open
     # when the take starts is switched on *on* the start tick (earlier ticks may be skipped around the pause).

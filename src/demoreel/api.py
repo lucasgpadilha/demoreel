@@ -393,7 +393,8 @@ def get_highlight(highlight_id: str) -> HighlightOut:
 
 
 @api.patch("/highlights/{highlight_id}", response_model=HighlightOut, tags=["highlights"],
-           summary="Replace title / description / tags / all segments")
+           summary="Replace title / description / tags / all segments; feature a play; move a hand-made clip "
+                   "between plays and fails")
 def patch_highlight(highlight_id: str, body: HighlightPatch) -> HighlightOut:
     with session_scope() as s:
         return service.highlight_out(s, service.patch_highlight(s, highlight_id, body))

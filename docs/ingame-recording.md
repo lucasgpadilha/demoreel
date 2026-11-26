@@ -111,7 +111,11 @@ Everything below is a port of CS Demo Manager (file names refer to its repositor
      `host_framerate <fps>`, the plugin's own panels off (`csdm_buttons_overlay 0`, `csdm_voice_indicator 0`,
      not in the reference: see [Known pitfalls](#known-pitfalls)), then your `ingame_commands`;
    - start - 4: `pause_playback` (the plugin pauses 2 s so the loading tint is not recorded);
-   - start: `spec_mode 1`, `spec_player <slot>`, `startmovie <n>-sequence`;
+   - start: `spec_mode 1`, `spec_player <slot>`, `startmovie <n>-sequence`. A segment with a fixed `camera`
+     (`{x, y, z, pitch, yaw}`, the numbers `spec_pos` prints in the console) gets `cl_demo_freecam 0` and
+     `spec_goto x y z pitch yaw` there instead (`addFocusCamera`: since the 2026-10-14 CS2 update the demo free
+     camera ignores `spec_goto` unless it is turned off first). Inside the pipeline that camera is a point of
+     view of its own (`cam:x,y,z,pitch,yaw`), so stored footage is matched per camera as it is per player;
    - end: `endmovie`; end + 64: `go_to_next_sequence` (the plugin restarts the demo from tick 0 for the next
      take) or `quit` after the last one.
 

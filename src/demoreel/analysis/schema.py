@@ -184,12 +184,25 @@ class TeamSummary(BaseModel):
     won: bool | None = None
 
 
+class SegmentCamera(BaseModel):
+    """A fixed camera position, as CS2's ``spec_pos`` / ``getpos`` print it (``spec_goto x y z pitch yaw``)."""
+
+    x: float
+    y: float
+    z: float
+    pitch: float = Field(description="Up/down angle in degrees (positive looks down).")
+    yaw: float = Field(description="Left/right angle in degrees.")
+
+
 class HighlightSegment(BaseModel):
     """A continuous slice of the demo, watched from one player's point of view."""
 
     start_tick: int
     end_tick: int
     pov_steamid: str | None = Field(None, description="Player whose POV is shown. None = free/overview camera.")
+    camera: SegmentCamera | None = Field(None, description=(
+        "Watch the segment from this fixed position instead of a player (in-game renderer only). Leave "
+        "pov_steamid empty. In CS2, `spec_pos` in the console prints the position of the free camera."))
     speed: float = Field(1.0, gt=0, le=8, description="Playback speed multiplier (0.5 = slow motion).")
     caption: str | None = None
     role: str = Field("play", description="play | replay (the same moment again from another point of view; "

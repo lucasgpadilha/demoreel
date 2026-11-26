@@ -129,6 +129,7 @@ def render(
 
     from .analysis import analyze_demo
     from .render import Clip, ClipSegment, RenderError, RenderJob, RenderOptions, get_renderer
+    from .render.base import segment_view
 
     a = analyze_demo(demo)
     if only is not None:
@@ -143,7 +144,7 @@ def render(
         raise typer.Exit(1)
     for h in picks:
         typer.echo(f"  R{h.round:<2} {h.duration_s:5.1f}s  {h.title}")
-    clips = [Clip(segments=[ClipSegment(s.start_tick, s.end_tick, s.pov_steamid, s.speed, s.caption) for s in h.segments],
+    clips = [Clip(segments=[ClipSegment(s.start_tick, s.end_tick, segment_view(s), s.speed, s.caption) for s in h.segments],
                   title=h.title, subtitle=h.description) for h in picks]
     out = out.resolve()
     out.parent.mkdir(parents=True, exist_ok=True)

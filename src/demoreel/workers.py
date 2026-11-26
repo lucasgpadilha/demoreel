@@ -37,6 +37,7 @@ from .analysis.schema import MatchAnalysis
 from .brand import brand_for
 from .config import get_settings
 from .db import Highlight, Job, Render, Worker, WorkerMaster, now, session_scope
+from .render.base import segment_view
 from .schemas import JobOut, WorkerFinish, WorkerOut
 from .webhooks import emit
 
@@ -220,7 +221,7 @@ def _clips(s: Session, highlight_ids: list[str]) -> list[dict[str, Any]]:
         out.append({"highlight_id": h.id, "title": h.title, "subtitle": h.description, "version": h.version,
                     "action_ticks": list(h.action_ticks or []),
                     "segments": [{"start_tick": x["start_tick"], "end_tick": x["end_tick"],
-                                  "pov_steamid": x.get("pov_steamid"), "speed": float(x.get("speed") or 1.0),
+                                  "pov_steamid": segment_view(x), "speed": float(x.get("speed") or 1.0),
                                   "caption": x.get("caption"), "role": x.get("role") or "play"}
                                  for x in (h.segments or [])]})
     return out

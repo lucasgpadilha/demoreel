@@ -44,7 +44,8 @@ server or `demoreel worker` running so analyses and renders get processed.
 | `list_matches`, `get_match` | Find a match; overview with scoreboard and top highlights |
 | `get_player_stats`, `list_rounds`, `get_round`, `search_kills` | Drill into the data |
 | `list_highlights`, `get_highlight` | Browse clips; read segments before editing |
-| `create_highlight` | New clip from segments, a tick range, or round + player |
+| `create_highlight` | New clip from segments, a tick range, or round + player; `category="fail"` files it under the fails (banter); a segment with `camera` `{x, y, z, pitch, yaw}` (from `spec_pos`) is filmed from that fixed spot instead of a player |
+| `set_category` | Move a hand-made clip between the plays and the fails of its match |
 | `edit_highlight` | Atomic list of edit operations |
 | `render_highlight`, `render_reel` | Produce video (async, optional blocking wait) |
 | `get_job`, `get_render`, `cancel_job` | Follow long-running work |

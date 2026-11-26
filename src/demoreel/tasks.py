@@ -19,7 +19,7 @@ from .compose.pipeline import finish
 from .config import get_settings
 from .db import Highlight, session_scope
 from .render import Clip, ClipSegment, RenderJob, RenderOptions, get_renderer
-from .render.base import RecorderBusy, RenderCancelled, RenderError
+from .render.base import RecorderBusy, RenderCancelled, RenderError, segment_view
 from .schemas import RenderOptionsIn
 from .webhooks import emit
 
@@ -245,7 +245,7 @@ def capture_match(ctx: jobs.JobContext) -> dict[str, Any]:
         analysis = service.load_analysis(m)
         demo_path = service.abs_path(m.demo_path)
         rows = s.scalars(select(Highlight).where(Highlight.id.in_(ctx.payload["highlight_ids"]))).all()
-        clips = [Clip(segments=[ClipSegment(x["start_tick"], x["end_tick"], x.get("pov_steamid"),
+        clips = [Clip(segments=[ClipSegment(x["start_tick"], x["end_tick"], segment_view(x),
                                             float(x.get("speed") or 1.0), None, x.get("role") or "play")
                                 for x in h.segments], highlight_id=h.id)
                  for h in rows]
@@ -307,7 +307,7 @@ def render(ctx: jobs.JobContext) -> dict[str, Any]:
                 continue  # deleted after the render was requested
             clips.append(Clip(
                 segments=[ClipSegment(start_tick=x["start_tick"], end_tick=x["end_tick"],
-                                      pov_steamid=x.get("pov_steamid"), speed=float(x.get("speed") or 1.0),
+                                      pov_steamid=segment_view(x), speed=float(x.get("speed") or 1.0),
                                       caption=x.get("caption"), role=x.get("role") or "play") for x in h.segments],
                 title=h.title, subtitle=h.description, highlight_id=h.id, action_ticks=list(h.action_ticks or [])))
         if not clips:

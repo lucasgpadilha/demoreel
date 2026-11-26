@@ -171,6 +171,10 @@ Several players "dying" on the same tick is a restart and is ignored. At most 12
 the two funniest (score ≥ 40, different players) are **featured** and get first-person videos. Measured on
 twenty matches: 2.0 close-range whiffs and 2.6 fatal team flashes per match.
 
+A clip made by hand can be banter too: create it with `"category": "fail"`, or move it later with
+`PATCH /highlights/{id} {"category": "fail"}` (MCP: `set_category`). It keeps its kind (`custom`), its title is
+what clients show, and its videos stay valid. What the analysis found keeps the category it was given.
+
 ## Chat
 
 `analysis.chat` keeps every all-chat line with the round, a **kind** and, when it comes within 20 s of a

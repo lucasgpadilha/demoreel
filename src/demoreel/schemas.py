@@ -167,12 +167,17 @@ class HighlightCreate(BaseModel):
     round: int | None = None
     player_steamid: str | None = None
     origin: Literal["manual", "agent"] = "manual"
+    category: Literal["play", "fail"] = Field("play", description="fail = banter: the clip is listed with the "
+                                                                  "fails of the match, not with its plays.")
 
 
 class HighlightPatch(BaseModel):
     title: str | None = None
     description: str | None = None
     tags: list[str] | None = None
+    category: Literal["play", "fail"] | None = Field(None, description=(
+        "Move a hand-made clip between the plays and the fails (banter) of its match. Its videos stay valid. "
+        "Plays and fails found by the analysis keep the category it gave them."))
     segments: list[HighlightSegment] | None = Field(None, description="Replaces all segments.")
     featured: bool | None = Field(None, description="Promote a play to (or remove it from) the featured ones, "
                                                     "which get first-person videos. A manual choice is kept "

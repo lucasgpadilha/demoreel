@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import ffmpeg
-from ..base import Availability, RenderCancelled, RenderError, RenderJob, RenderResult
+from ..base import Availability, RenderCancelled, RenderError, RenderJob, RenderResult, player_view
 from . import actions, encode, launcher, plugin, procs, slots, staging, xray
 from .settings import IngameSettings, default_lock_path
 from .settings import load as load_settings
@@ -290,7 +290,7 @@ class IngameRenderer:
         job.progress(0.02, "Reading player slots from the demo")
         tickrate = float(job.analysis.tickrate or 64)
         max_tick = int(job.analysis.total_ticks or 0) or None
-        pov_ticks = [seg.start_tick for clip in job.clips for seg in clip.segments if seg.pov_steamid]
+        pov_ticks = [seg.start_tick for clip in job.clips for seg in clip.segments if player_view(seg.pov_steamid)]
         slot_lookup: actions.SlotLookup | None = None
         if pov_ticks:
             try:

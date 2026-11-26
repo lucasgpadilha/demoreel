@@ -32,7 +32,7 @@ from ..analysis.chat import reactions
 from ..analysis.schema import KillEvent, MatchAnalysis, RoundSummary
 from ..brand import Brand
 from ..render import ffmpeg
-from ..render.base import Clip, ClipSegment, RenderCancelled, RenderError
+from ..render.base import Clip, ClipSegment, RenderCancelled, RenderError, player_view
 from . import sfx
 from .hud import ChatLine, ClipInfo, Hud, HudState
 
@@ -140,7 +140,7 @@ def _play_of(clip: Clip, analysis: MatchAnalysis) -> tuple[RoundSummary | None, 
     """(round, player, his kills shown by the clip). A replay segment shows a kill again from the victim's
     eyes: it neither adds kills nor decides whose play this is."""
     play = [s for s in clip.segments if _is_play(s)] or list(clip.segments)
-    pov = next((s.pov_steamid for s in play if s.pov_steamid), None)
+    pov = next((player_view(s.pov_steamid) for s in play if player_view(s.pov_steamid)), None)
     first = play[0].start_tick
     rnd = next((r for r in analysis.rounds if r.start_tick <= first <= max(r.official_end_tick, r.end_tick)), None)
     kills: list[KillEvent] = []
@@ -689,7 +689,8 @@ def compose_body(master: Path, out: Path, *, spans: list[Span], clips: list[Clip
     # Vertical and square cuts lose the game's own kill feed (top-right corner), so ours is drawn instead.
     feed = None
     round_kills: list[list] = [[] for _ in clips]
-    povs: list[str | None] = [next((sg.pov_steamid for sg in c.segments if _is_play(sg) and sg.pov_steamid), None)
+    povs: list[str | None] = [next((player_view(sg.pov_steamid) for sg in c.segments
+                                    if _is_play(sg) and player_view(sg.pov_steamid)), None)
                               for c in clips]
     if hud and layout.kind != "landscape":
         try:

@@ -373,3 +373,50 @@ def test_xray_always_on_ignores_the_ranges():
     seqs = A.with_xray(A.plan_sequences(clips, {"A": 3}).sequences, clips, {"A": [(1808, 2064)]})
     acts = A.sequence_actions(seqs[0], A.ActionOptions(show_xray=True), is_last=True)
     assert [a.cmd for a in acts if a.cmd.startswith("spec_show_xray")] == ["spec_show_xray 1"]
+
+
+CAM = {"x": -324.4, "y": -8.2, "z": 506.0, "pitch": 38.2, "yaw": -121.3}
+
+
+def test_a_fixed_camera_segment_teleports_the_free_camera_instead_of_following_a_player():
+    from demoreel.render.base import camera_view, parse_camera_view, player_view, segment_view
+
+    view = camera_view(CAM)
+    assert view == "cam:-324.40,-8.20,506.00,38.20,-121.30"
+    assert parse_camera_view(view) == (-324.4, -8.2, 506.0, 38.2, -121.3)
+    assert player_view(view) is None and player_view(STEAM_A) == STEAM_A
+    # a stored segment gives its player first, its camera otherwise
+    assert segment_view({"pov_steamid": None, "camera": CAM}) == view
+    assert segment_view({"pov_steamid": STEAM_A}) == STEAM_A
+
+    # the camera, then the same seconds from a player's eyes: never asks the slot lookup about the camera
+    asked = []
+
+    def lookup(steamid, tick):
+        asked.append(steamid)
+        return SLOTS.get(steamid)
+
+    plan = actions.plan_sequences([Clip(segments=[ClipSegment(5000, 5600, view),
+                                                  ClipSegment(5000, 5600, STEAM_A, role="replay")])], lookup)
+    assert asked == [STEAM_A] and not plan.warnings
+    cam_seq = plan.sequences[0]
+    assert cam_seq.cameras == (CameraCut(5000, None, (-324.4, -8.2, 506.0, 38.2, -121.3)),)
+
+    got = cmds(actions.sequence_actions(cam_seq, ActionOptions(), is_last=False))
+    goto = "spec_goto -324.4 -8.2 506 38.2 -121.3"
+    # CSDM's addFocusCamera: the demo free camera off, then the jump; set early and again on the start tick
+    early = 5000 - actions.CAMERA_LEAD_TICKS
+    assert got.index((early, "cl_demo_freecam 0")) < got.index((early, goto))
+    assert got.index((5000, "cl_demo_freecam 0")) < got.index((5000, goto)) < got.index((5000, "startmovie 1-sequence"))
+    assert not any(c.startswith(("spec_player", "spec_mode")) for _, c in got)
+
+
+def test_a_camera_cut_inside_a_take_moves_between_a_player_and_a_fixed_camera():
+    from demoreel.render.base import camera_view
+
+    view = camera_view(CAM)
+    plan = actions.plan_sequences([Clip(segments=[ClipSegment(5000, 5300, STEAM_A), ClipSegment(5300, 5600, view),
+                                                  ClipSegment(5601, 5800, view)])], SLOTS)
+    assert [c.goto is not None for c in plan.sequences[0].cameras] == [False, True]
+    got = cmds(actions.sequence_actions(plan.sequences[0], ActionOptions(), is_last=True))
+    assert (5300, "cl_demo_freecam 0") in got and (5000, "spec_player 6") in got

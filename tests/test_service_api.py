@@ -645,6 +645,52 @@ def test_produce_first_person_without_the_game_says_what_is_missing(client, matc
     assert str(n) in body["detail"] and "DEMOREEL_INGAME_ENABLED" in body["detail"]
 
 
+def test_a_hand_made_clip_can_be_banter_and_what_the_analysis_found_cannot_be_moved(client, match_id):
+    base = f"/api/v1/matches/{match_id}"
+    plays = client.get(f"{base}/highlights").json()
+    cut = {"start_tick": plays[0]["segments"][0]["start_tick"], "end_tick": plays[0]["segments"][0]["end_tick"]}
+    made = client.post(f"{base}/highlights", json={**cut, "title": "caught napping", "category": "fail"})
+    assert made.status_code == 201 and made.json()["category"] == "fail" and made.json()["kind"] == "custom"
+    hid = made.json()["id"]
+    assert hid in [h["id"] for h in client.get(f"{base}/highlights?category=fail").json()]
+    assert hid not in [h["id"] for h in client.get(f"{base}/highlights").json()]
+
+    r = client.post(f"/api/v1/highlights/{hid}/renders", json={"renderer": "radar"}).json()["render"]
+    moved = client.patch(f"/api/v1/highlights/{hid}", json={"category": "play"}).json()
+    assert moved["category"] == "play" and moved["version"] == made.json()["version"]
+    assert client.get(f"/api/v1/renders/{r['id']}").json()["stale"] is False  # listed elsewhere, same video
+    assert hid in [h["id"] for h in client.get(f"{base}/highlights").json()]
+    assert client.patch(f"/api/v1/highlights/{hid}", json={"category": "fail"}).json()["category"] == "fail"
+    client.post(f"{base}/rescore")
+    assert client.get(f"/api/v1/highlights/{hid}").json()["category"] == "fail"  # re-scoring leaves it where it was put
+
+    refused = client.patch(f"/api/v1/highlights/{plays[0]['id']}", json={"category": "fail"})
+    assert refused.status_code == 400 and "hand-made" in refused.json()["detail"]
+    assert client.post(f"{base}/highlights", json={**cut, "category": "meme"}).status_code == 422
+
+
+
+def test_a_segment_can_be_watched_from_a_fixed_camera(client, match_id):
+    base = f"/api/v1/matches/{match_id}"
+    seg = client.get(f"{base}/highlights").json()[0]["segments"][0]
+    cam = {"x": -324.4, "y": -8.2, "z": 506.0, "pitch": 38.2, "yaw": -121.3}
+    span = {"start_tick": seg["start_tick"], "end_tick": seg["end_tick"]}
+    made = client.post(f"{base}/highlights", json={"title": "from above", "segments": [
+        {**span, "camera": cam}, {**span, "pov_steamid": seg["pov_steamid"], "role": "replay"}]})
+    assert made.status_code == 201, made.text
+    stored = made.json()["segments"]
+    assert stored[0]["camera"] == cam and stored[0]["pov_steamid"] is None
+    assert stored[1]["camera"] is None
+
+    from demoreel.render.base import segment_view
+    assert segment_view(stored[0]) == "cam:-324.40,-8.20,506.00,38.20,-121.30"
+    assert segment_view(stored[1]) == seg["pov_steamid"]
+
+    both = client.post(f"{base}/highlights", json={"segments": [{**span, "camera": cam,
+                                                                  "pov_steamid": seg["pov_steamid"]}]})
+    assert both.status_code == 400 and "not both" in both.json()["detail"]
+    assert client.post(f"{base}/highlights", json={"segments": [{**span, "camera": {"x": 1}}]}).status_code == 422
+
 def test_render_request_carries_its_format(client, match_id):
     hid = first_highlight(match_id)
     r = client.post(f"/api/v1/highlights/{hid}/renders", json={"renderer": "radar", "options": {"format": "9:16"}})

@@ -262,6 +262,17 @@ def build_server() -> MCPServer:
             return _highlight_brief(service.highlight_out(s, h))
 
     @mcp.tool(annotations=WRITE, description=(
+        "Move a hand-made clip between the plays and the fails (banter) of its match. Its videos stay valid. "
+        "Plays and fails found by the analysis cannot be moved."))
+    @_threaded
+    def set_category(highlight_id: str, category: Literal["play", "fail"]) -> dict[str, Any]:
+        from .schemas import HighlightPatch
+
+        with session_scope() as s:
+            h = service.patch_highlight(s, highlight_id, HighlightPatch(category=category))
+            return _highlight_brief(service.highlight_out(s, h))
+
+    @mcp.tool(annotations=WRITE, description=(
         "Re-run the highlight scoring and curation on a match that is already analyzed (fast, the demo is not "
         "read again). Highlights keep their ids and videos; featured plays chosen by hand are kept."))
     @_threaded
@@ -272,18 +283,21 @@ def build_server() -> MCPServer:
     @mcp.tool(annotations=WRITE, description=(
         "Create a custom highlight. Three ways: (1) `segments` = explicit list; (2) `start_tick` + `end_tick` "
         "(+ `pov`) for one continuous moment; (3) `round_number` + `player` to auto-clip that player's kills in "
-        "that round. Returns the new highlight (not rendered yet)."))
+        "that round. `category='fail'` lists it with the fails (banter) of the match instead of its plays. "
+        "Returns the new highlight (not rendered yet)."))
     @_threaded
     def create_highlight(match_id: str, title: str | None = None, description: str | None = None,
                          segments: list[HighlightSegment] | None = None, start_tick: int | None = None,
                          end_tick: int | None = None, pov: Annotated[str | None, Field(description="Player to watch.")] = None,
                          round_number: int | None = None, player: str | None = None,
-                         tags: list[str] | None = None) -> dict[str, Any]:
+                         tags: list[str] | None = None,
+                         category: Literal["play", "fail"] = "play") -> dict[str, Any]:
         a = _analysis(match_id)
         body = HighlightCreate(title=title, description=description, tags=tags or [], segments=segments,
                                start_tick=start_tick, end_tick=end_tick,
                                pov_steamid=_resolve_player(a, pov) if pov else None, round=round_number,
-                               player_steamid=_resolve_player(a, player) if player else None, origin="agent")
+                               player_steamid=_resolve_player(a, player) if player else None, origin="agent",
+                               category=category)
         with session_scope() as s:
             return service.highlight_out(s, service.create_highlight(s, match_id, body)).model_dump(mode="json")
 

@@ -257,6 +257,9 @@ def validate_segments(match: Match, segments: list[HighlightSegment]) -> list[Hi
             raise ServiceError(f"Segment {i}: ticks must be within 0..{total} (got {seg.start_tick}..{seg.end_tick}).")
         if seg.end_tick - seg.start_tick < tickrate // 4:
             raise ServiceError(f"Segment {i}: must be at least 0.25s long (end_tick must be > start_tick).")
+        if seg.camera is not None and seg.pov_steamid is not None:
+            raise ServiceError(f"Segment {i}: give either pov_steamid (a player's eyes) or camera (a fixed "
+                               "position), not both.")
         if seg.pov_steamid is not None and seg.pov_steamid not in known:
             raise ServiceError(f"Segment {i}: pov_steamid {seg.pov_steamid!r} is not a player of this match. "
                                f"Players: {sorted(known)}")
@@ -471,6 +474,9 @@ def highlight_out(s: Session, h: Highlight, *, with_renders: bool = True) -> Hig
     )
 
 
+HAND_MADE_KINDS = ("custom", "player_round")  # what create_highlight makes; every other kind comes from the analysis
+
+
 def create_highlight(s: Session, match_id: str, body: HighlightCreate) -> Highlight:
     m = get_match(s, match_id)
     analysis = load_analysis(m)
@@ -510,7 +516,7 @@ def create_highlight(s: Session, match_id: str, body: HighlightCreate) -> Highli
     h = Highlight(match_id=m.id, kind=kind, title=title, description=body.description or "", round=rnd,
                   player_steamid=player, player_name=names.get(player) if player else None, score=0.0,
                   tags=list(body.tags), segments=[x.model_dump() for x in segments], kill_ticks=kill_ticks,
-                  origin=body.origin)
+                  origin=body.origin, category="fail" if body.category == "fail" else None)
     s.add(h)
     s.flush()
     return h
@@ -535,6 +541,13 @@ def patch_highlight(s: Session, highlight_id: str, body: HighlightPatch) -> High
         h.description = body.description
     if body.tags is not None:
         h.tags = list(body.tags)
+    if body.category is not None and body.category != (h.category or "play"):
+        if h.kind not in HAND_MADE_KINDS:
+            raise ServiceError(f"Highlight {h.id} is a {h.kind!r} found by the analysis, which decides its category "
+                               f"({h.category or 'play'}). Only hand-made clips can be moved: create one with "
+                               "`segments` or a tick range and give it the category you want.")
+        h.category = "fail" if body.category == "fail" else None  # where it is listed, not how it looks: no new version
+        h.updated_at = now()
     if body.featured is not None:
         h.featured, h.featured_by = bool(body.featured), "manual"
         if not body.featured:
@@ -691,7 +704,7 @@ def _plan_renderer(s: Session, m: Match, highlights: list[Highlight], renderer: 
     from . import workers
     from .compose import master as masters
     from .render import CAPABILITY
-    from .render.base import ClipSegment
+    from .render.base import ClipSegment, segment_view
 
     settings = get_settings()
     want = (renderer or settings.default_renderer or "auto").lower()
@@ -699,7 +712,7 @@ def _plan_renderer(s: Session, m: Match, highlights: list[Highlight], renderer: 
         raise ServiceError(f"Unknown renderer {want!r}. Use one of: auto, {', '.join(CAPABILITY)}.")
     if want == "radar":
         return "radar", CAPABILITY["radar"], None
-    segments = [ClipSegment(x["start_tick"], x["end_tick"], x.get("pov_steamid"), float(x.get("speed") or 1.0))
+    segments = [ClipSegment(x["start_tick"], x["end_tick"], segment_view(x), float(x.get("speed") or 1.0))
                 for h in highlights for x in (h.segments or [])]
     need = masters.capture_fps_for(segments, opts.fps or settings.render_fps)
     # Footage is matched by the size it is *recorded* at, not by the shape of the video being made.
@@ -1001,7 +1014,7 @@ def produce(s: Session, match_id: str, *, renderers: list[str], formats: list[st
     session (a ``capture_match`` job), and their renders are queued when it finishes; plays that already have
     footage, and all 2D renders, are queued right away."""
     from .compose import master as masters
-    from .render.base import ClipSegment
+    from .render.base import ClipSegment, segment_view
 
     settings = get_settings()
     m = get_match(s, match_id)
@@ -1036,7 +1049,7 @@ def produce(s: Session, match_id: str, *, renderers: list[str], formats: list[st
     kw = {"width": settings.ingame_capture_width, "height": settings.ingame_capture_height, "extra": {},
           "kills": masters.xray.match_kills(analysis), "tickrate": float(m.tickrate or 64)}
     for h in rows:
-        segs = [ClipSegment(x["start_tick"], x["end_tick"], x.get("pov_steamid"), float(x.get("speed") or 1.0))
+        segs = [ClipSegment(x["start_tick"], x["end_tick"], segment_view(x), float(x.get("speed") or 1.0))
                 for x in (h.segments or [])]
         segs = [sg for c in masters.recordable([Clip_(segs)], m.total_ticks or 0) for sg in c.segments]
         need = masters.capture_fps_for(segs, settings.render_fps)

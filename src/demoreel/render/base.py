@@ -35,10 +35,43 @@ class RecorderBusy(RenderError):
 class ClipSegment:
     start_tick: int
     end_tick: int
+    # Who or where the segment is watched from: a player's SteamID, a fixed camera (``camera_view``) or None.
     pov_steamid: str | None = None
     speed: float = 1.0
     caption: str | None = None
     role: str = "play"  # "replay": the same moment from another point of view (HUD shows only the caption)
+
+
+# A fixed camera travels through the pipeline as a point of view of its own, so stored footage, capture planning
+# and composition tell it apart from every player and from other cameras without a field of their own.
+CAMERA_VIEW_PREFIX = "cam:"
+
+
+def camera_view(camera: Any) -> str | None:
+    """``cam:x,y,z,pitch,yaw`` for a camera given as a mapping or an object with those attributes."""
+    if camera is None:
+        return None
+    get = camera.get if isinstance(camera, dict) else lambda k: getattr(camera, k)
+    return CAMERA_VIEW_PREFIX + ",".join(f"{float(get(k)):.2f}" for k in ("x", "y", "z", "pitch", "yaw"))
+
+
+def parse_camera_view(view: str | None) -> tuple[float, float, float, float, float] | None:
+    """The five numbers of a ``cam:`` point of view, or None for a player / no point of view."""
+    if not view or not view.startswith(CAMERA_VIEW_PREFIX):
+        return None
+    x, y, z, pitch, yaw = (float(v) for v in view[len(CAMERA_VIEW_PREFIX):].split(","))
+    return x, y, z, pitch, yaw
+
+
+def player_view(view: str | None) -> str | None:
+    """The SteamID of a player point of view; None for a fixed camera or the free camera."""
+    return None if not view or view.startswith(CAMERA_VIEW_PREFIX) else view
+
+
+def segment_view(seg: Any) -> str | None:
+    """Point of view of a stored segment (dict) or a ``HighlightSegment``: its player, else its fixed camera."""
+    get = seg.get if isinstance(seg, dict) else lambda k: getattr(seg, k, None)
+    return get("pov_steamid") or camera_view(get("camera"))
 
 
 @dataclass
