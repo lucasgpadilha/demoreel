@@ -241,6 +241,10 @@ def recording_lock(path: Path, wait_s: float = 0.0, cancelled: Callable[[], bool
 # --- running the game ---------------------------------------------------------------------------------------
 
 
+class LoaderFailed(RenderError):
+    """The loader (HLAE) could not start the game, or the game never appeared: HLAE's problem, not the game's."""
+
+
 @dataclass
 class GameRun:
     returncode: int
@@ -366,10 +370,10 @@ def run_loader(command: Sequence[str], *, env: Mapping[str, str] | None = None, 
                     break
                 loader_code = proc.poll()
                 if not seen and loader_code not in (None, 0):
-                    raise RenderError(f"HLAE could not start the game (exit code {loader_code}). "
+                    raise LoaderFailed(f"HLAE could not start the game (exit code {loader_code}). "
                                       f"{_tail(log_path, 600)}".strip())
                 if not seen and elapsed > appear_timeout_s:
-                    raise RenderError(f"HLAE was started but CS2 did not appear within {int(appear_timeout_s)} s. "
+                    raise LoaderFailed(f"HLAE was started but CS2 did not appear within {int(appear_timeout_s)} s. "
                                       f"{_tail(log_path, 600)}".strip())
                 if cancelled():
                     raise RenderCancelled("Render cancelled; the game was closed.")

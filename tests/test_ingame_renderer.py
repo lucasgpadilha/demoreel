@@ -120,7 +120,8 @@ def renderer_for(settings: IngameSettings, game, *, cs2_running=False, steam_run
                  slots=None) -> IngameRenderer:
     table = {STEAM_A: 6, STEAM_B: 11} if slots is None else slots
     return IngameRenderer(settings, run_game=game, resolve_slots=lambda demo, ticks: table,
-                          is_cs2_running=lambda: cs2_running, is_steam_running=lambda: steam_running)
+                          is_cs2_running=lambda: cs2_running, is_steam_running=lambda: steam_running,
+                          find_dialog=lambda marker: None)
 
 
 # --- availability ---------------------------------------------------------------------------------------------

@@ -20,6 +20,7 @@ Per-job knobs in ``RenderOptions.extra`` (all optional): ``ingame_hud`` ("deathn
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -28,6 +29,7 @@ import shutil
 import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -59,8 +61,35 @@ GAME_EXIT_WAIT_S = 30.0  # after a launch, how long the game may take to be gone
 log = logging.getLogger("demoreel.ingame")
 
 
+PLUGIN_LOAD_TIMEOUT_S = 120.0  # no csdm.log by then: the plugin did not load, waiting longer changes nothing
+QUICK_EXIT_S = 20.0  # a game gone this soon without recording never got to the demo
+DIALOG_CHECK_S = 5.0  # how often the game is looked at for an error box while nothing is recorded
+HLAE_FAILURES_NAME = "hlae-failures.json"  # <data_dir>/ingame: HLAE / CS2 pairs that did not record
+
+
 class _GameDidNotQuit(RenderError):
     """Every frame was written but the game is still open (the final ``quit`` action did not run)."""
+
+
+class HlaeFailed(RenderError):
+    """Recording failed for a reason that is HLAE's - its loader, or its hook in the game - not the plugin's or
+    the demo's. With the ``auto`` backend the render is then recorded again with the game's own recorder."""
+
+
+# An error box that names HLAE's hook (after a CS2 update: "AfxHookSource2 ... addresses.cpp ...").
+_HLAE_DIALOG = re.compile(r"afx|hlae|advancedfx|addresses\.cpp|mirv", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class _Launch:
+    """What a game launch's checks and messages need to know."""
+
+    settings: IngameSettings
+    binary: plugin.PluginBinary | None
+    marker: str  # the demo the game plays: tells the recording's game from anybody else's
+    hlae: bool
+    patch: str | None  # installed CS2 patch, as steam.inf writes it
+    plugin_timeout_s: float = PLUGIN_LOAD_TIMEOUT_S
 
 
 def _flag(extra: dict[str, Any], key: str, default: bool) -> bool:
@@ -106,7 +135,8 @@ class IngameRenderer:
                  run_loader: Callable[..., launcher.GameRun] = launcher.run_loader,
                  is_cs2_running: Callable[[], bool | None] = procs.is_cs2_running,
                  is_steam_running: Callable[[], bool | None] = procs.is_steam_running,
-                 dedicated_servers: Callable[[], list[procs.GameProcess]] = procs.dedicated_servers) -> None:
+                 dedicated_servers: Callable[[], list[procs.GameProcess]] = procs.dedicated_servers,
+                 find_dialog: Callable[[str | None], str | None] = procs.game_dialog) -> None:
         self._settings = settings
         self._run_game = run_game
         self._run_loader = run_loader
@@ -114,6 +144,7 @@ class IngameRenderer:
         self._is_cs2_running = is_cs2_running
         self._is_steam_running = is_steam_running
         self._dedicated_servers = dedicated_servers
+        self._find_dialog = find_dialog  # (marker of the recording's game) -> "title: text" of an error box
         self._install_lock_cache: tuple[float, Path | None] | None = None
 
     def _shared_install(self, settings: IngameSettings) -> str | None:
@@ -225,6 +256,7 @@ class IngameRenderer:
         details.update({"platform": settings.platform, "backend": self._backend(settings, {}),
                         "hlae": str(settings.hlae_exe) if settings.hlae_available else None,
                         "hlae_version": settings.hlae_version if settings.hlae_available else None,
+                        "hlae_failed_with_this_patch": hlae_failure(settings) if settings.hlae_available else None,
                         "hlae_installs": [{"version": h.version, "path": str(h.exe), "usable": h.usable}
                                           for h in hlae_installs(settings.hlae_root)],
                         "plugin_dir": str(settings.plugin_dir)})
@@ -333,24 +365,51 @@ class IngameRenderer:
         wait_s = _number(extra, "ingame_lock_wait_s", 1800.0)
         with self._hold(settings.lock_path, settings.install_lock_path, wait_s, job.cancelled,
                         on_wait=lambda waited: job.progress(0.01, "Waiting for another in-game recording to finish")):
-            return self._render_locked(job, settings)
+            auto = self._requested_backend(settings, extra) == "auto"
+            try:
+                return self._render_locked(job, settings)
+            except HlaeFailed as exc:
+                if not auto:
+                    raise
+                # After a CS2 update HLAE is usually the first to break: record this one with the game's own
+                # recorder, and keep doing so for this HLAE and this CS2 patch until either changes.
+                remember_hlae_failure(settings, str(exc))
+                log.warning("HLAE failed; recording again with the game's own recorder: %s", exc)
+                job.progress(0.05, "HLAE did not record; recording with the game's own recorder")
+                result = self._render_locked(job, settings, backend="startmovie")
+                result.details["warnings"].insert(0, f"Recorded with the game's own recorder instead of HLAE. "
+                                                     f"{exc}")
+                return result
+
+    @staticmethod
+    def _requested_backend(settings: IngameSettings, extra: dict[str, Any]) -> str:
+        return str(extra.get("ingame_backend") or settings.backend or "auto").lower()
 
     @staticmethod
     def _backend(settings: IngameSettings, extra: dict[str, Any]) -> str:
-        backend = str(extra.get("ingame_backend") or settings.backend or "auto").lower()
-        if backend == "auto":  # HLAE records several times faster; use it wherever it is installed
-            backend = "hlae" if settings.hlae_available else "startmovie"
+        backend = IngameRenderer._requested_backend(settings, extra)
+        if backend == "auto":  # HLAE records several times faster; use it wherever it is installed and works
+            backend = "hlae" if settings.hlae_available and hlae_failure(settings) is None else "startmovie"
         if backend not in BACKENDS:
-            raise RenderError(f"Unknown in-game recording backend {backend!r}. Available: {', '.join(BACKENDS)}.")
+            raise RenderError(f"Unknown in-game recording backend {backend!r}. Available: auto, "
+                              f"{', '.join(BACKENDS)}.")
         return backend
 
-    def _render_locked(self, job: RenderJob, settings: IngameSettings) -> RenderResult:
+    def _render_locked(self, job: RenderJob, settings: IngameSettings, backend: str | None = None) -> RenderResult:
+        """``backend``: forced (the ``auto`` retry after HLAE failed); otherwise as the request and the
+        settings say."""
         options = job.options
         extra = options.extra or {}
-        backend = self._backend(settings, extra)
+        warnings: list[str] = []
+        if backend is None:
+            backend = self._backend(settings, extra)
+            failed = hlae_failure(settings) if settings.hlae_available else None
+            if backend == "startmovie" and failed and self._requested_backend(settings, extra) == "auto":
+                warnings.append(f"{_hlae_name(settings)} is not used with this CS2 patch: it did not record with "
+                                f"it before ({failed}). Install a newer HLAE in {settings.hlae_root}/<version>/ "
+                                "to try HLAE again.")
         hlae = backend == "hlae"
         hlae_dir = Path(os.path.abspath(job.work_dir)) / "hlae"
-        warnings: list[str] = []
         width, height, fps = encode.even(options.width), encode.even(options.height), max(1, int(options.fps))
 
         launcher.assert_can_start(self._is_cs2_running, self._is_steam_running)
@@ -487,6 +546,9 @@ class IngameRenderer:
         stall_timeout_s = _number(extra, "ingame_stall_timeout_s", 300.0)
 
         # 3. Record ----------------------------------------------------------------------------------------
+        launch = _Launch(settings=settings, binary=binary, marker=str(staged.path), hlae=hlae,
+                         patch=plugin.read_cs2_patch_text(settings),
+                         plugin_timeout_s=_number(extra, "ingame_plugin_timeout_s", PLUGIN_LOAD_TIMEOUT_S))
         recorded = 0
         for number, batch in enumerate(batches, start=1):
             if job.cancelled():
@@ -495,13 +557,17 @@ class IngameRenderer:
             recorded += len(batch)
             batch_seconds = actions.expected_frames(batch, fps, tickrate) / float(fps)
             timeout_s = settings.timeout_s or (240.0 + 90.0 * len(batch) + 12.0 * batch_seconds)
+            # What earlier launches wrote is no sign of this one starting: everything below counts from here.
+            before = encode.hlae_bytes(hlae_dir)[0] if hlae else len(encode.frame_names(settings, scope))
             if hlae:
                 on_poll = self._hlae_poller(job, hlae_dir, len(plan.sequences), startup_timeout_s,
-                                            stall_timeout_s, done_at=recorded)
+                                            stall_timeout_s, done_at=recorded, baseline=before, launch=launch,
+                                            in_launch=len(batch))
             else:
                 on_poll = self._progress_poller(
                     job, settings, expected, startup_timeout_s, stall_timeout_s, last_name=batch[-1].name,
-                    last_expected=actions.expected_frames([batch[-1]], fps, tickrate), scope=scope)
+                    last_expected=actions.expected_frames([batch[-1]], fps, tickrate), scope=scope,
+                    baseline=before, launch=launch)
             if number == 1:
                 job.progress(0.05, "Starting CS2")
             run: launcher.GameRun | None = None
@@ -511,9 +577,12 @@ class IngameRenderer:
                     run = (self._run_loader if hlae else self._run_game)(
                         command, env=launcher.build_env(settings, installed.env), timeout_s=timeout_s,
                         cancelled=job.cancelled, on_poll=on_poll, log_path=job.work_dir / "cs2-output.log",
-                        kill_names=procs.CS2_PROCESS_NAMES, kill_marker=str(staged.path))
+                        kill_names=procs.CS2_PROCESS_NAMES, kill_marker=launch.marker)
                 except _GameDidNotQuit as exc:
                     warnings.append(str(exc))
+                except launcher.LoaderFailed as exc:
+                    raise HlaeFailed(f"{_hlae_name(settings)} ({settings.hlae_exe}) could not start CS2 patch "
+                                     f"{launch.patch or '(unknown)'}: {exc} {hlae_advice(settings)}") from exc
                 finally:
                     # gameinfo.gi and the plugin's settings file are restored and the plugin removed when this
                     # block ends - also when the game was just killed: let it go first (the plugin writes its
@@ -525,9 +594,10 @@ class IngameRenderer:
             if not gone:
                 warnings.append(f"CS2 was still closing {GAME_EXIT_WAIT_S:.0f} s after recording; what it kept "
                                 "locked in the CS2 folder is removed the next time demoreel starts.")
-            if run is not None and run.returncode != 0 and run.duration_s < 2.0:
-                raise RenderError(f"CS2 failed to start (exit code {run.returncode}). {run.output_tail[-600:]}")
             if run is not None:
+                after = encode.hlae_bytes(hlae_dir)[0] if hlae else len(encode.frame_names(settings, scope))
+                if after <= before and run.duration_s < QUICK_EXIT_S:
+                    raise RenderError(self._quick_exit_message(run, launch))
                 game_seconds += run.duration_s
                 game = run
 
@@ -549,7 +619,7 @@ class IngameRenderer:
         except RenderCancelled:
             raise
         except RenderError as exc:
-            raise RenderError(self._with_diagnostics(str(exc), settings, game)) from exc
+            raise RenderError(self._with_diagnostics(str(exc), launch, game)) from exc
         warnings.extend(encoded.warnings)
         job.progress(0.96, "Joining takes")
         warnings.extend(encode.finalize(encoded.parts, job.out_path, job.thumbnail_path, encoded.duration_s))
@@ -573,14 +643,48 @@ class IngameRenderer:
             })
 
     @staticmethod
-    def _with_diagnostics(message: str, settings: IngameSettings, game: launcher.GameRun | None) -> str:
+    def _with_diagnostics(message: str, launch: _Launch, game: launcher.GameRun | None) -> str:
         parts = [message]
         if game is not None:
             parts.append(f"Game exit code: {game.returncode} after {game.duration_s:.0f} s.")
-        log_tail = plugin.read_plugin_log(settings, 800)
+        log_tail = plugin.read_plugin_log(launch.settings, 800)
         parts.append(f"csdm.log: {log_tail}" if log_tail else
-                     "No csdm.log was written: the plugin did not load (wrong build for this CS2 version?).")
+                     "No csdm.log was written. " + plugin.plugin_advice(launch.settings, launch.binary, launch.patch))
         return " ".join(parts)
+
+    @staticmethod
+    def _quick_exit_message(run: launcher.GameRun, launch: _Launch) -> str:
+        text = (f"CS2 closed {run.duration_s:.0f} s after it was started, before it got to the demo (exit code "
+                f"{run.returncode}). That is usually Steam: check that it is running and logged in, and that no "
+                "CS2 update is pending or downloading (Steam closes the game then; start CS2 once from Steam to "
+                "see).")
+        if launch.hlae:
+            text += (f" With HLAE the game can also close at once when {_hlae_name(launch.settings)} does not "
+                     "support this CS2 patch: try DEMOREEL_INGAME_BACKEND=startmovie.")
+        return f"{text} {run.output_tail[-400:]}".strip()
+
+    def _not_started(self, launch: _Launch, elapsed: float, state: dict[str, float]) -> None:
+        """While nothing is recorded yet: give up early when the game shows an error box or the plugin never
+        loaded, instead of waiting for the whole start-up timeout with nothing to show for it."""
+        settings = launch.settings
+        if elapsed - state.get("dialog_at", -1e9) >= DIALOG_CHECK_S:
+            state["dialog_at"] = elapsed
+            dialog = self._find_dialog(launch.marker)
+            if dialog:
+                head = (f"CS2 showed an error box and was closed (it waits there for a click that never comes): "
+                        f"\"{dialog[:300]}\".")
+                if launch.hlae and _HLAE_DIALOG.search(dialog):
+                    raise HlaeFailed(f"{head} It comes from {_hlae_name(settings)} ({settings.hlae_exe}), which "
+                                     f"does not support CS2 patch {launch.patch or '(unknown)'} yet. "
+                                     f"{hlae_advice(settings)}")
+                raise RenderError(self._with_diagnostics(head, launch, None))
+        if elapsed > launch.plugin_timeout_s and not plugin.plugin_loaded(settings):
+            text = (f"Nothing was recorded and no csdm.log was written {int(launch.plugin_timeout_s)} s after CS2 "
+                    f"was started; the game was closed. {plugin.plugin_advice(settings, launch.binary, launch.patch)}")
+            if launch.hlae:
+                text += (f" With HLAE, its hook can also stop the game before the plugin loads: "
+                         f"{hlae_advice(settings)}")
+            raise RenderError(text)
 
     @staticmethod
     def _hlae_encoder(extra: dict[str, Any], settings: IngameSettings) -> str:
@@ -590,13 +694,15 @@ class IngameRenderer:
         return HLAE_ENCODERS[name]
 
     def _hlae_poller(self, job: RenderJob, hlae_dir: Path, takes: int, startup_timeout_s: float,
-                     stall_timeout_s: float, *, done_at: int | None = None) -> Callable[[float], None]:
+                     stall_timeout_s: float, *, done_at: int | None = None, baseline: int = 0,
+                     launch: _Launch | None = None, in_launch: int | None = None) -> Callable[[float], None]:
         """Progress + stall detection for HLAE, which writes one growing video per take instead of frames.
 
         ``takes`` is the whole recording; ``done_at`` how many of them exist when this launch is finished (the
-        recording may take several launches)."""
+        recording may take several launches); ``baseline`` how many existed when it started, and ``in_launch``
+        how many it records."""
         done_at = takes if done_at is None else done_at
-        state = {"checked_at": -10.0, "bytes": 0, "changed_at": 0.0}
+        state = {"checked_at": -10.0, "bytes": -1, "changed_at": 0.0}
 
         def on_poll(elapsed: float) -> None:
             if elapsed - state["checked_at"] < 2.0:
@@ -605,15 +711,21 @@ class IngameRenderer:
             started, size = encode.hlae_bytes(hlae_dir)
             if size != state["bytes"]:
                 state["bytes"], state["changed_at"] = size, elapsed
-            if started == 0:
+            if started <= baseline:  # nothing of this launch yet
+                if launch is not None:
+                    self._not_started(launch, elapsed, state)
                 if elapsed > startup_timeout_s:
-                    raise RenderError(f"CS2 did not start recording within {int(startup_timeout_s)} s and was "
-                                      "closed. HLAE may not support the installed CS2 version yet.")
+                    raise self._hlae_did_not_record(launch, startup_timeout_s)
                 job.progress(0.05, "Waiting for CS2 to load the demo")
                 return
             idle = elapsed - state["changed_at"]
             if started >= done_at and idle > 60.0:
-                raise _GameDidNotQuit("Every take was recorded but CS2 did not quit by itself; it was closed.")
+                # The last take's file exists and stopped growing: finished, or frozen in the middle of it? The
+                # plugin logs every command it runs; with a log, finished means every take's end ran.
+                ends = (plugin.commands_run(launch.settings, "mirv_streams record end")
+                        if launch is not None else None)
+                if ends is None or ends >= (in_launch or 0):
+                    raise _GameDidNotQuit("Every take was recorded but CS2 did not quit by itself; it was closed.")
             if idle > stall_timeout_s:
                 raise RenderError(f"Recording stalled: nothing written for {int(idle)} s (take {started}/{takes}); "
                                   "CS2 was closed.")
@@ -622,15 +734,31 @@ class IngameRenderer:
 
         return on_poll
 
+    @staticmethod
+    def _hlae_did_not_record(launch: _Launch | None, timeout_s: float) -> RenderError:
+        if launch is None:
+            return RenderError(f"CS2 did not start recording within {int(timeout_s)} s and was closed. HLAE may not "
+                               "support the installed CS2 version yet.")
+        settings = launch.settings
+        text = (f"{_hlae_name(settings)} ({settings.hlae_exe}) did not start recording with CS2 patch "
+                f"{launch.patch or '(unknown)'} within {int(timeout_s)} s and the game was closed; it probably does "
+                f"not support this CS2 version yet. {hlae_advice(settings)}")
+        # The plugin ran the take's `mirv_streams record start` and no video came: that is HLAE's recorder.
+        if (plugin.commands_run(settings, "mirv_streams record start") or 0) > 0:
+            return HlaeFailed(text)
+        return RenderError(text + " " + IngameRenderer._with_diagnostics("", launch, None).strip())
+
     def _progress_poller(self, job: RenderJob, settings: IngameSettings, expected: int,
                          startup_timeout_s: float, stall_timeout_s: float, *, last_name: str,
-                         last_expected: int, scope: encode.RawScope = encode.RawScope()) -> Callable[[float], None]:
+                         last_expected: int, scope: encode.RawScope = encode.RawScope(), baseline: int = 0,
+                         launch: _Launch | None = None) -> Callable[[float], None]:
         """Progress + stall detection from the number of frames on disk, checked every ~2 s.
 
         ``last_name`` is the take recorded last: once (nearly) all of its frames exist and nothing new shows up
-        for a minute, the game is considered done even though it did not quit.
+        for a minute, the game is considered done even though it did not quit. ``baseline``: frames written by
+        earlier launches of the same recording, which say nothing about this one.
         """
-        state = {"checked_at": -10.0, "frames": 0, "changed_at": 0.0}
+        state = {"checked_at": -10.0, "frames": baseline, "changed_at": 0.0}
         last_nearly_done = max(1, last_expected - max(5, last_expected // 33))
         last_prefix = last_name.lower()
 
@@ -643,23 +771,68 @@ class IngameRenderer:
             if frames != state["frames"]:
                 state["frames"], state["changed_at"] = frames, elapsed
             idle = elapsed - state["changed_at"]
-            if frames == 0:
+            if frames <= baseline:  # nothing of this launch yet
+                if launch is not None:
+                    self._not_started(launch, elapsed, state)
                 if elapsed > startup_timeout_s:
-                    raise RenderError(self._with_diagnostics(
-                        f"CS2 did not start recording within {int(startup_timeout_s)} s and was closed.",
-                        settings, None))
+                    message = f"CS2 did not start recording within {int(startup_timeout_s)} s and was closed."
+                    raise RenderError(self._with_diagnostics(message, launch, None) if launch else message)
                 job.progress(0.05, "Waiting for CS2 to load the demo")
                 return
             if idle > 60.0 and sum(1 for n in frame_names if n.startswith(last_prefix)) >= last_nearly_done:
                 raise _GameDidNotQuit("All frames were recorded but CS2 did not quit by itself; it was closed.")
             if idle > stall_timeout_s:
-                raise RenderError(self._with_diagnostics(
-                    f"Recording stalled: no new frame for {int(idle)} s ({frames}/{expected}); CS2 was closed.",
-                    settings, None))
+                message = f"Recording stalled: no new frame for {int(idle)} s ({frames}/{expected}); CS2 was closed."
+                raise RenderError(self._with_diagnostics(message, launch, None) if launch else message)
             job.progress(0.05 + 0.63 * min(1.0, frames / max(1, expected)),
                          f"Recording in CS2 ({min(frames, expected)}/{expected} frames)")
 
         return on_poll
+
+
+def _hlae_name(settings: IngameSettings) -> str:
+    return f"HLAE {settings.hlae_version}" if settings.hlae_version else "HLAE"
+
+
+def hlae_advice(settings: IngameSettings) -> str:
+    """What to do when HLAE does not record: where a newer one goes, and the game's own recorder meanwhile."""
+    return (f"Install a newer HLAE ({HLAE_RELEASES}) in {settings.hlae_root}/<version>/ - the highest version "
+            "there is used - or record with the game's own recorder: set DEMOREEL_INGAME_BACKEND=startmovie (per "
+            "render: options.extra.ingame_backend = \"startmovie\").")
+
+
+HLAE_RELEASES = "https://github.com/advancedfx/advancedfx/releases"
+
+
+def _hlae_key(settings: IngameSettings) -> str:
+    return f"{settings.hlae_version or settings.hlae_exe}|{plugin.read_cs2_patch_text(settings) or 'unknown patch'}"
+
+
+def _read_failures(settings: IngameSettings) -> dict[str, Any]:
+    try:
+        data = json.loads((settings.data_dir / HLAE_FAILURES_NAME).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def hlae_failure(settings: IngameSettings) -> str | None:
+    """Why the installed HLAE did not record with the installed CS2 patch, if it was tried and failed."""
+    entry = _read_failures(settings).get(_hlae_key(settings))
+    if not isinstance(entry, dict):
+        return None
+    return f"{entry.get('at', 'earlier')}: {str(entry.get('error') or 'it did not record')[:240]}"
+
+
+def remember_hlae_failure(settings: IngameSettings, error: str) -> None:
+    """``auto`` stops choosing this HLAE for this CS2 patch; a new HLAE folder or a CS2 update tries it again."""
+    data = _read_failures(settings)
+    data[_hlae_key(settings)] = {"at": time.strftime("%Y-%m-%d %H:%M"), "error": error[:1000]}
+    try:
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        (settings.data_dir / HLAE_FAILURES_NAME).write_text(json.dumps(data, indent=1), encoding="utf-8")
+    except OSError as exc:
+        log.warning("Could not remember that HLAE failed: %s", exc)
 
 
 def wait_until_gone(is_running: Callable[[], bool | None], timeout_s: float = 10.0) -> bool:

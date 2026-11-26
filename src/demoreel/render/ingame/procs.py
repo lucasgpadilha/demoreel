@@ -243,6 +243,81 @@ def game_pids(marker: str | None = None) -> list[int]:
             and (wanted is None or wanted in _comparable(p.command_line or ""))]
 
 
+def _windows_dialogs(pids: set[int]) -> list[str]:
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)  # type: ignore[attr-defined]
+    enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = [enum_proc, wintypes.LPARAM]
+    user32.EnumChildWindows.argtypes = [wintypes.HWND, enum_proc, wintypes.LPARAM]
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, ctypes.c_void_p,
+                                           wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
+    user32.SendMessageTimeoutW.restype = ctypes.c_size_t
+
+    def text_of(hwnd) -> str:
+        # WM_GETTEXT, not GetWindowText: only the message reaches controls of another process. With a timeout,
+        # so a hung game cannot hang the recorder.
+        buffer = ctypes.create_unicode_buffer(1024)
+        result = ctypes.c_size_t(0)
+        if user32.SendMessageTimeoutW(hwnd, 0x000D, 1024, buffer, 0x0002, 500, ctypes.byref(result)):
+            return buffer.value.strip()
+        return ""
+
+    def class_of(hwnd) -> str:
+        buffer = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(hwnd, buffer, 64)
+        return buffer.value
+
+    found: list[str] = []
+
+    def each_window(hwnd, _lparam) -> bool:
+        try:
+            pid = wintypes.DWORD(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value in pids and user32.IsWindowVisible(hwnd) and class_of(hwnd) == "#32770":  # a dialog
+                lines: list[str] = []
+
+                def each_child(child, _lp) -> bool:
+                    if class_of(child) == "Static":
+                        line = text_of(child)
+                        if line:
+                            lines.append(line)
+                    return True
+
+                user32.EnumChildWindows(hwnd, enum_proc(each_child), 0)
+                title = text_of(hwnd)
+                found.append(f"{title}: {' '.join(lines)}" if lines else title or "(a dialog without text)")
+        except Exception:  # noqa: BLE001 - one odd window must not stop the search
+            pass
+        return True
+
+    user32.EnumWindows(enum_proc(each_window), 0)
+    return found
+
+
+def dialogs_of(pids: Iterable[int]) -> list[str]:
+    """``"<title>: <text>"`` of every dialog box (an error box, typically) shown by these processes. Windows
+    only; elsewhere, and when windows cannot be listed, ``[]``. Never raises."""
+    wanted = {int(p) for p in pids}
+    if sys.platform != "win32" or not wanted:
+        return []
+    try:
+        return _windows_dialogs(wanted)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def game_dialog(marker: str | None) -> str | None:
+    """The first dialog box shown by the recording's game (see :func:`game_pids`), or ``None``. A game that
+    shows one - HLAE's hook failing after a CS2 update does - waits for a click that never comes."""
+    found = dialogs_of(game_pids(marker))
+    return found[0] if found else None
+
+
 def popen_group_kwargs() -> dict:
     """``subprocess.Popen`` keyword arguments that make :func:`kill_process_tree` reliable."""
     if sys.platform == "win32":

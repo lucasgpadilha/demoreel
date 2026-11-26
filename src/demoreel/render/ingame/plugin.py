@@ -506,6 +506,38 @@ def read_plugin_log(settings: IngameSettings, max_chars: int = 1500) -> str:
         return ""
 
 
+def plugin_loaded(settings: IngameSettings) -> bool:
+    """The plugin writes ``csdm.log`` once it is loaded (it is deleted before each launch)."""
+    return (settings.bin_dir / "csdm.log").is_file()
+
+
+def commands_run(settings: IngameSettings, command: str) -> int | None:
+    """How many times ``csdm.log`` says the plugin ran ``command`` (``[<tick>] Executing: <command>``);
+    ``None`` without a log."""
+    try:
+        text = (settings.bin_dir / "csdm.log").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return len(re.findall(rf"Executing:\s*{re.escape(command)}\s*$", text, re.MULTILINE | re.IGNORECASE))
+
+
+def plugin_advice(settings: IngameSettings, binary: PluginBinary | None, cs2_patch: str | None) -> str:
+    """What to do when the plugin did not load: which file was used, from when, and where a new one comes from."""
+    if binary is None:
+        used = "the plugin file"
+    else:
+        try:
+            when = time.strftime("%Y-%m-%d", time.localtime(binary.path.stat().st_mtime))
+        except OSError:
+            when = "an unknown date"
+        used = f"the plugin file `{binary.path}` (build {binary.version}, copied there on {when})"
+    patch = f"CS2 patch {cs2_patch}" if cs2_patch else "the installed CS2"
+    name = bundled_binary_name(None, settings.platform)
+    return (f"The plugin did not load: {used} probably does not work with {patch} (CS2 updates break it). Copy "
+            f"a current `{name}` from {CSDM_REPO_URL}/tree/main/{CSDM_STATIC_DIR} to `{settings.plugin_dir / name}`"
+            f", or set DEMOREEL_INGAME_PLUGIN_VERSION to a build that covers this patch.")
+
+
 def _install_vulkan_layer(settings: IngameSettings, binary: PluginBinary) -> bool:
     """Port of ``installCs2VulkanLayer``: library + implicit-layer manifest inside the plugin folder."""
     layer_dir = vulkan_layer_dir(settings)

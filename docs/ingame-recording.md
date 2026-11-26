@@ -88,6 +88,7 @@ Passed in the render request's `options.extra` (all optional):
 | `ingame_swap_red_blue` | swap red and blue while encoding | Linux without the Vulkan layer |
 | `ingame_lock_wait_s` | how long to wait for another recording to finish. A queued job that is still waiting after that goes back to the queue, in its place; it does not fail | 0 for queued jobs, 1800 for a direct render |
 | `ingame_startup_timeout_s` / `ingame_stall_timeout_s` | give up when no frame / no new frame shows up for this long | 300 / 300 |
+| `ingame_plugin_timeout_s` | give up when the plugin has not written `csdm.log` this long after the game started (it did not load) | 120 |
 
 `width`, `height`, `fps` and `crf` come from the normal render options; the game window is opened at
 `width x height`. `title_cards` and segment captions are not drawn by this renderer, and **`speed` is ignored**
@@ -184,10 +185,26 @@ like its takes (`<n>-sequence…`) are deleted, then the folders left empty.
 
 ## Known pitfalls
 
-- **CS2 updates break the plugin.** It hooks game internals; after a game update it may crash the game, show an
-  error dialog, or silently not load (symptom: "CS2 wrote no frames" / "No csdm.log was written"). Wait for
-  CS Demo Manager to publish new binaries and replace the file. Old demos often cannot be played by a newer
-  CS2 at all; the render result carries a warning when the demo's patch differs from the installed one.
+- **CS2 updates break the plugin, and HLAE.** Both hook game internals; after a game update the game may crash,
+  show an error box, or the plugin may silently not load. The recorder does not wait the whole start-up
+  timeout for that:
+  - an error box shown by the game (Windows) ends the wait at once, and the error quotes its title and text;
+  - no `csdm.log` two minutes after the game started (`ingame_plugin_timeout_s`, default 120) means the plugin
+    did not load: the error names the plugin file used, when it was copied there, the CS2 patch, and where a
+    current build comes from;
+  - a game that is gone within 20 s without recording gets its own message (Steam not logged in, or a CS2
+    update pending), not "the plugin did not load".
+
+  With HLAE, the error names the HLAE version and folder, the CS2 patch, where to put a newer HLAE and the
+  fallback (`DEMOREEL_INGAME_BACKEND=startmovie`, or `options.extra.ingame_backend = "startmovie"` per render).
+  When the backend is `auto` and the failure is clearly HLAE's - its error box (`AfxHookSource2`), its loader
+  not starting the game, or `mirv_streams record start` run without a video coming out - the render is
+  recorded again at once with the game's own recorder, and that HLAE is not used with that CS2 patch again
+  (`<data_dir>/ingame/hlae-failures.json`; a newer HLAE folder or the next CS2 patch tries it again; `doctor`
+  shows it as `hlae_failed_with_this_patch`). A backend asked for by name is never swapped.
+  Then wait for CS Demo Manager / HLAE to publish new binaries and replace the file. Old demos often cannot be
+  played by a newer CS2 at all; the render result carries a warning when the demo's patch differs from the
+  installed one.
 - **One instance at a time.** A lock file (`<data_dir>/ingame/recording.lock`) serializes recordings, and a
   second one in the system's temp folder, named after the CS2 folder (`demoreel-cs2-<hash>.lock`), does the same
   across data folders: two demoreel set-ups on one machine (a checkout and a worktree, say) never record with
@@ -381,7 +398,10 @@ as recorded and muxed with its sound. The frames HLAE really wrote are counted p
 master, so tick ↔ video time stays exact.
 
 HLAE follows CS2 updates with a delay: after a game update, recording may fail until a new HLAE release is
-installed. The error says so, and `DEMOREEL_INGAME_BACKEND=startmovie` keeps things working meanwhile.
+installed. The error says so - which HLAE, which CS2 patch, where the new one goes - and `auto` records with
+the game's own recorder meanwhile (see [Known pitfalls](#known-pitfalls)); `DEMOREEL_INGAME_BACKEND=startmovie`
+makes that the rule. Seen on 2026-11-25: HLAE 2.193.1 on CS2 1.42.0.1 stopped the game at start with an
+`AfxHookSource2` error box about `addresses.cpp`; HLAE 2.193.2 records with it.
 
 Verified with HLAE 2.193.0: three plays / six takes at 1080p30 (x264 and NVENC) and 1080p60 (NVENC), frame
 counts 1928–1930 of 1930 expected, sound present, kill feed only, automatic x-ray. Not verified: cancellation
