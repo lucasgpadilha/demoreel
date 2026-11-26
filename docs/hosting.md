@@ -66,6 +66,48 @@ database open until then.
 Embedding the mirror in the community's site is described in [embedding.md](embedding.md): the `FRAME_ANCESTORS`
 variable is the `frame-ancestors` policy that page asks for.
 
+The mirror's `DEMOREEL_ADMIN_KEY` must have at least 16 characters (`openssl rand -hex 24` gives 48): a
+shorter key, or an example value such as `change-me`, stops the server at start with a message naming the
+variable. Check it before updating the code of an existing mirror.
+
+## Keys, other sites and what visitors see
+
+Without any key (the default of `demoreel serve` on 127.0.0.1) everyone who reaches the server is the
+organiser. That is fine on your own machine and nowhere else. `DEMOREEL_ADMIN_KEY` makes it a public viewer:
+anyone reads, only the organiser's key changes things. `DEMOREEL_API_KEY` closes reading too. Keys need 16
+characters or more. `docker compose up` publishes the port on 127.0.0.1 only; its comments say how to open it
+on purpose.
+
+What the server refuses, so that a web page open in someone's browser cannot use it:
+
+| Rule | Applies | To allow more |
+|---|---|---|
+| A request must name one of the server's hosts: `localhost`, `127.0.0.1`, `[::1]`, `DEMOREEL_HOST`, the host of `DEMOREEL_PUBLIC_URL` (stops DNS rebinding) | while no key is set (`/mcp` always) | `DEMOREEL_ALLOWED_HOSTS`, e.g. `["192.168.0.10"]`; `["*"]` turns it off |
+| Pages of other sites change nothing: `POST`/`PUT`/`PATCH`/`DELETE` with a foreign `Origin` get 403 | always | `DEMOREEL_CORS_ORIGINS` |
+| Browsers let other sites read the answers (CORS) only for this server's own names (any port), the kits' `ui.embed.parents` and `DEMOREEL_CORS_ORIGINS`; while a key is set, any site may read (`GET`) | always | `DEMOREEL_CORS_ORIGINS` |
+| Only this server, the kits' `ui.embed.parents` and `DEMOREEL_FRAME_ANCESTORS` may frame the UI (CSP `frame-ancestors`; a proxy may replace it, as the mirror's Caddyfile does) | always | `DEMOREEL_FRAME_ANCESTORS`; `["*"]` allows any site |
+| A request under `/api/v1` without the key it needs is refused before its body is read; bodies are limited to `DEMOREEL_MAX_JSON_KB` (1024) for JSON and `DEMOREEL_MAX_UPLOAD_MB` for an upload; a zip may list 1000 files | always | the two settings |
+| Webhooks may not point to private, loopback or link-local addresses | while a key is set | `DEMOREEL_WEBHOOKS_ALLOW_PRIVATE=1` |
+
+A mirror behind a proxy that passes on its own host name (another site forwarding `/demoreel/*` to it) keeps
+working: with a key set the host name is not checked.
+
+What a visitor (no organiser key, while one is set) gets differs from the organiser in a few places:
+
+- **Chat.** Free chat text is never sent to visitors: people paste phone numbers and addresses into it. In
+  `GET /matches/{id}/analysis` a line keeps its text only when it is short banter with no digits or links
+  (`analysis/chat.py`, `shareable`); the others keep their classification with an empty `text` and
+  `redacted: true`. The lines attached to highlights and the chat rankings use the same rule, with slurs
+  masked.
+- **Errors and machine details.** The `error` of jobs, matches and videos is null, and `/capabilities` says
+  which renderers exist and whether they are available, without the reason or details: those texts carry the
+  folders of the recording machine (CS2, HLAE), worker names and the end of the game console.
+- **Webhooks and workers** are listed only to the organiser (a webhook address works like a password).
+
+Names and SteamIDs of players are public by design: they are what the scoreboards, highlights, rivalries and
+player pages are made of, on the server and on its mirror. A community that does not want them public should
+not publish its matches.
+
 ## Sizes (measured on 20 matches)
 
 About 0.45 GB of videos per match (first-person 16:9 and 9:16 for the featured plays, 2D replays for all of
