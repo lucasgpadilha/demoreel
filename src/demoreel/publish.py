@@ -48,6 +48,10 @@ class Target:
     def parse(cls, text: str | None) -> Target:
         value = (text or "").strip()
         host, sep, path = value.partition(":")
+        if host.startswith("-"):  # ssh would read it as an option (-oProxyCommand=... runs a command here)
+            raise PublishError(f"Publish target {value!r} starts with '-', which ssh would take as an option. "
+                               "Use '[user@]host:/absolute/path/to/data', for example "
+                               "'demoreel@example.org:/srv/demoreel/data'.")
         if not sep or not host or not path.startswith("/") or any(c.isspace() for c in value):
             raise PublishError(
                 f"Publish target {value!r} is not valid. Use '[user@]host:/absolute/path/to/data', for example "
@@ -77,7 +81,7 @@ def _ssh(target: Target, command: str, *, stdin: bytes | None = None, timeout: f
         raise PublishError("The 'ssh' client was not found on this machine. Install OpenSSH (on Windows: "
                            "Settings > Optional features > OpenSSH Client) and try again.")
     try:
-        r = subprocess.run([exe, "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", target.host, command],
+        r = subprocess.run([exe, "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "--", target.host, command],
                            input=stdin, capture_output=True, timeout=timeout, creationflags=_NO_WINDOW)
     except subprocess.TimeoutExpired as e:
         raise PublishError(f"The server {target.host} did not answer within {timeout:.0f} s.") from e
@@ -202,7 +206,7 @@ def _batches(items: list[tuple[str, Path]]) -> Iterable[list[tuple[str, Path]]]:
 def _send(target: Target, batch: list[tuple[str, Path]], on_file: Callable[[int], None]) -> None:
     exe = shutil.which("ssh")
     assert exe  # _ssh ran before and checked
-    proc = subprocess.Popen([exe, "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", target.host,
+    proc = subprocess.Popen([exe, "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "--", target.host,
                              f"tar -xf - -C {shlex.quote(target.path)}"],
                             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                             creationflags=_NO_WINDOW)

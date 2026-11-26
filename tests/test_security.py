@@ -557,6 +557,28 @@ def test_the_default_radar_pack_is_a_fixed_release_with_a_hash():
     assert "/latest/" not in s.radar_images_url and len(s.radar_images_sha256) == 64
 
 
+# ------------------------------------------------------------------------------------------- publish
+
+def test_a_publish_target_cannot_smuggle_an_ssh_option(monkeypatch):
+    import subprocess
+
+    from demoreel import publish
+
+    with pytest.raises(publish.PublishError, match="starts with '-'"):
+        publish.Target.parse("-oProxyCommand=calc.exe:/srv/demoreel/data")
+    ran = []
+
+    def fake_run(args, **kwargs):
+        ran.append(args)
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    monkeypatch.setattr(publish.shutil, "which", lambda name: "ssh")
+    monkeypatch.setattr(publish.subprocess, "run", fake_run)
+    publish._ssh(publish.Target.parse("demoreel@mirror.example:/srv/demoreel/data"), "true")
+    args = ran[0]
+    assert args[args.index("demoreel@mirror.example") - 1] == "--"  # nothing after it is read as an option
+
+
 # ------------------------------------------------------------------------------------------- docker
 
 def test_docker_compose_publishes_the_port_on_this_machine_only():
