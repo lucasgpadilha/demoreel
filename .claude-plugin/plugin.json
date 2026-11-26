@@ -1,0 +1,18 @@
+{
+  "name": "demoreel",
+  "description": "Turn CS2 demos into match stats, highlight clips and videos: a skill that teaches the agent demoreel, plus its MCP server at http://127.0.0.1:8000/mcp (start it with `uv run demoreel serve`).",
+  "author": {
+    "name": "Lucas Padilha",
+    "url": "https://github.com/lucasgpadilha"
+  },
+  "homepage": "https://github.com/lucasgpadilha/demoreel",
+  "repository": "https://github.com/lucasgpadilha/demoreel",
+  "license": "MIT",
+  "keywords": ["cs2", "counter-strike", "demo", "highlights", "esports", "mcp"],
+  "mcpServers": {
+    "demoreel": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}

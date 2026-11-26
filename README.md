@@ -137,6 +137,22 @@ trophies, the cry-baby ranking of the chat — see
 
 More in [docs/agents.md](docs/agents.md).
 
+### Agent skill
+
+[`skills/demoreel/SKILL.md`](skills/demoreel/SKILL.md) teaches an agent when and how to use all of this:
+what to install, how to connect, the main flows and the pitfalls of in-game recording. In Claude Code, the
+repository is also a plugin marketplace that installs the skill and the MCP connection to a local
+`demoreel serve`:
+
+```text
+/plugin marketplace add lucasgpadilha/demoreel
+/plugin install demoreel@demoreel
+```
+
+Other agents: copy `skills/demoreel/` into their skills folder, or build the zip that skill marketplaces take
+with `uv run python scripts/build_skill_zip.py` (→ `dist/demoreel-skill.zip`). Details in
+[docs/agents.md](docs/agents.md#agent-skill-and-claude-code-plugin).
+
 ## Renderers
 
 | | `ingame` | `radar` |

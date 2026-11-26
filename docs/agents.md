@@ -99,3 +99,63 @@ Limits: ≤ 40 segments, ≤ 300 s per highlight, each segment ≥ 0.25 s and in
 Templates (intro/outro bumpers per client/map/situation), music, transitions and speed ramps will arrive as
 new fields on the same highlight spec and new operations on the same `edit_highlight` tool — plus cheap
 preview renders and frame grabs so an agent can review its own cut. See the [roadmap](../ROADMAP.md).
+
+## Agent skill and Claude Code plugin
+
+[`skills/demoreel/SKILL.md`](../skills/demoreel/SKILL.md) is an [Agent Skill](https://agentskills.io): a
+short guide an agent loads when a request is about CS2 demos, stats, clips or videos. It says what to install
+(and what only in-game recording needs), how to connect, the flows of this page, and the recording pitfalls
+(CS2 updates breaking the plugin or HLAE, recording refused while CS2 is open, jobs that need a worker).
+[`references/rest-api.md`](../skills/demoreel/references/rest-api.md) maps the same flows to REST calls.
+
+### Claude Code
+
+The repository is a plugin marketplace whose only plugin is the repository itself:
+
+```text
+/plugin marketplace add lucasgpadilha/demoreel
+/plugin install demoreel@demoreel
+```
+
+That installs the skill (Claude picks it up on its own, or call it with `/demoreel:demoreel`) and an MCP
+server over HTTP at `http://127.0.0.1:8000/mcp`, so start `uv run demoreel serve` in your clone first. The
+plugin does not run demoreel itself: Claude Code copies plugins into its own cache, where a `demoreel mcp` would
+see a database of its own, with none of your matches and no worker. For a server elsewhere or one with a key,
+add your own connection (`claude mcp add --transport http demoreel <url> --header "Authorization: Bearer
+<key>"`) and disable the plugin's in `/mcp`. `plugin.json` has no `version` on purpose: every commit is an
+update (`/plugin marketplace update demoreel`). Check the manifests with `claude plugin validate .`.
+
+### Other agents and skill marketplaces
+
+Copy `skills/demoreel/` into the folder your agent loads skills from (Claude Code without the plugin:
+`~/.claude/skills/demoreel/`) and connect the MCP server as in [Connecting](#connecting). Marketplaces that take
+a zip get it from:
+
+```bash
+uv run python scripts/build_skill_zip.py           # -> dist/demoreel-skill.zip (git-ignored)
+uv run python scripts/build_skill_zip.py --check   # only check the skill
+```
+
+The zip has `SKILL.md` at its root and `references/` next to it, LF line endings and fixed timestamps (same
+sources, same bytes). The script refuses frontmatter without a valid `name` and `description`, files outside
+`references/`, `scripts/` and `assets/`, relative links that would break once zipped (link to the repository
+instead) and archives over 50 MB. `tests/test_skill.py` also checks that every tool the skill names exists in
+the MCP server, so keep the skill in step when a tool is renamed.
+
+Suggested listing text (free listing; links to this repository are fine, offers of paid versions elsewhere
+are not):
+
+> **demoreel: CS2 demos to stats, highlight clips and videos**
+>
+> Teaches your agent to drive demoreel, an open-source (MIT), self-hosted service for Counter-Strike 2
+> demos: scoreboard-grade stats (K/D/A, ADR, KAST, rating, clutches, opening duels), automatic highlights and
+> fails, rivalries and trophies across matches, hand-made clips (fixed camera spots included) and rendered
+> videos, either first-person game footage or a 2D radar replay, in 16:9 and 9:16 for phones.
+>
+> **Requirements.** demoreel installed and running on Windows or Linux (`git clone
+> https://github.com/lucasgpadilha/demoreel`, `uv sync`, `uv run demoreel serve`; uv brings Python) and an
+> agent that can use MCP or call a REST API. First-person video recording also needs Counter-Strike 2 through
+> Steam and a GPU on the same machine (HLAE optional). Stats, highlights and 2D videos need neither.
+> The skill is instructions only (no binaries or scripts); it talks to your own demoreel server.
+>
+> Source, documentation and issues: https://github.com/lucasgpadilha/demoreel. Not affiliated with Valve.

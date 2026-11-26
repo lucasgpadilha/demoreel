@@ -1,0 +1,17 @@
+{
+  "name": "demoreel",
+  "owner": {
+    "name": "Lucas Padilha",
+    "url": "https://github.com/lucasgpadilha"
+  },
+  "description": "demoreel: CS2 demo analysis and highlight videos for agents.",
+  "plugins": [
+    {
+      "name": "demoreel",
+      "source": "./",
+      "description": "Skill + MCP server for demoreel: CS2 match stats, highlight clips and first-person or 2D videos from demos.",
+      "category": "gaming",
+      "tags": ["cs2", "counter-strike", "demo", "highlights", "video"]
+    }
+  ]
+}
