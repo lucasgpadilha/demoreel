@@ -17,7 +17,7 @@
 // the content, the organizer's tools never shown, and messages to the parent page so it can size the frame
 // and mirror the route (see docs/embedding.md).
 
-import { el, fill, icon } from './dom.js';
+import { el, fill, icon, safeUrl } from './dom.js';
 import { t, locale, locales, setLocale } from './i18n.js';
 import { api, apiInfo, hasApiKey, isAuthRequired, onAuthRequired, requestApiKey, resetApiBase, serverUrl, setKeyPrompter } from './api.js';
 import { applyCachedBrand, brand, loadBrand } from './brand.js';
@@ -255,7 +255,7 @@ function drawFooter(health) {
     el('div', { class: 'foot-brand' },
       el('p', { class: 'foot-name' }, brand.name),
       brand.tagline ? el('p', null, brand.tagline) : null,
-      brand.url ? el('a', { href: brand.url, target: '_blank', rel: 'noopener' }, brand.url.replace(/^https?:\/\//, '').replace(/\/$/, '')) : null),
+      safeUrl(brand.url) ? el('a', { href: safeUrl(brand.url), target: '_blank', rel: 'noopener' }, brand.url.replace(/^https?:\/\//, '').replace(/\/$/, '')) : null),
     el('div', { class: 'foot-meta' },
       el('p', null, t('foot.made'), ' ', el('a', { href: serverUrl('/docs') }, t('foot.api')), health ? ` ${t('foot.version', { v: health.version })}` : ''),
       el('p', null, t('foot.valve')),

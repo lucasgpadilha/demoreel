@@ -643,6 +643,7 @@ export default {
   'foot.valve': 'Not affiliated with Valve.',
   'foot.key': 'Change API key',
   'foot.resetApi': 'Back to the default API ({base})',
+  'api.otherServer': 'This link makes the page use another server: {base}. That server will see everything you do here, including the organiser key if you type it. Use it?',
 
   'missing.title': 'This page does not exist',
   'missing.body': 'The link may be wrong, or the play was deleted.',

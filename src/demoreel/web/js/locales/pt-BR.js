@@ -654,6 +654,7 @@ export default {
   'foot.valve': 'Sem vínculo com a Valve.',
   'foot.key': 'Trocar chave de API',
   'foot.resetApi': 'Voltar para a API padrão ({base})',
+  'api.otherServer': 'Este link faz a página usar outro servidor: {base}. Esse servidor vai ver tudo o que você fizer aqui, inclusive a chave de organizador, se você digitá-la. Usar mesmo assim?',
 
   'missing.title': 'Essa página não existe',
   'missing.body': 'O link pode estar errado ou a jogada foi apagada.',

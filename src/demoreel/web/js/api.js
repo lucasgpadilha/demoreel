@@ -2,6 +2,7 @@
 //
 // The API base defaults to the origin that serves this page. For development against another origin,
 // open the page with `?api=http://127.0.0.1:8077` (persisted in localStorage; `?api=reset` clears it).
+// A server that is not on this computer is used only after the person confirms it.
 
 import { t } from './i18n.js';
 
@@ -33,6 +34,13 @@ function sameOriginBase() {
   }
 }
 
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/** True for an API on this computer or on the server that serves this page: a link may point there freely. */
+export function isLocalApi(url, pageHost = location.host) {
+  return LOCAL_HOSTS.has(url.hostname) || url.hostname.endsWith('.localhost') || url.host === pageHost;
+}
+
 function resolveBase() {
   const own = sameOriginBase();
   try {
@@ -43,11 +51,15 @@ function resolveBase() {
         lsSet(LS_BASE, null);
       } else {
         const u = new URL(raw);
-        if (u.protocol === 'http:' || u.protocol === 'https:') lsSet(LS_BASE, u.href.replace(/\/+$/, ''));
+        // Another server would see everything done here, the organiser's key included: a link from
+        // someone else must not switch it silently (the choice is remembered).
+        const ok = (u.protocol === 'http:' || u.protocol === 'https:')
+          && (isLocalApi(u) || window.confirm(t('api.otherServer', { base: u.origin })));
+        if (ok) lsSet(LS_BASE, u.href.replace(/\/+$/, ''));
       }
     }
   } catch {
-    /* malformed override: ignore */
+    /* malformed override, or no dialog allowed (sandboxed frame): ignore */
   }
   const override = lsGet(LS_BASE);
   if (override && override !== own) return { base: override, overridden: true };
