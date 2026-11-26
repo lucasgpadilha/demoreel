@@ -186,7 +186,8 @@ def test_takes_are_encoded_joined_and_thumbnailed_with_real_ffmpeg(tmp_path):
     # Both streams made it through the stream-copy concat, at the requested size.
     import subprocess
 
-    probe = subprocess.run([ffmpeg.ffmpeg_path(), "-hide_banner", "-i", str(out)], capture_output=True, text=True)
+    probe = subprocess.run([ffmpeg.ffmpeg_path(), "-hide_banner", "-i", str(out)], capture_output=True, text=True,
+                           errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     assert "Video: h264" in probe.stderr and "128x72" in probe.stderr
     assert "Audio: aac" in probe.stderr and "48000 Hz" in probe.stderr
 

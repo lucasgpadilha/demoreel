@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import json
 import shlex
-import subprocess
 import sys
-import time
 import wave
 from pathlib import Path
 
@@ -356,25 +354,20 @@ def test_the_last_hlae_take_is_finished_only_when_the_plugin_ran_its_end(tmp_pat
         poll(90.0)
 
 
-# --- the error box itself, on Windows ---------------------------------------------------------------------------
-
-BOX = ("import ctypes; ctypes.windll.user32.MessageBoxW(None, 'addresses.cpp(812): test only, closed by the "
-       "test', 'AfxHookSource2 Error', 0x10)")
+# --- the error box itself -----------------------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="error boxes are looked for on Windows only")
-def test_an_error_box_of_a_process_is_found_with_its_title_and_text():
-    # The base interpreter: a venv's python.exe on Windows can be a launcher that runs it as a child process,
-    # and the box would belong to that child.
-    child = subprocess.Popen([getattr(sys, "_base_executable", sys.executable), "-c", BOX])
-    try:
-        deadline = time.monotonic() + 15
-        found: list[str] = []
-        while not found and time.monotonic() < deadline:
-            time.sleep(0.2)
-            found = procs.dialogs_of([child.pid])
-        assert found and found[0].startswith("AfxHookSource2 Error: addresses.cpp(812)")
-        assert procs.dialogs_of([]) == []
-    finally:
-        child.kill()
-        child.wait(timeout=15)
+def test_the_error_box_of_the_game_is_told_from_its_other_windows():
+    """A fake window list (no real window is opened): only a visible dialog of one of the given processes counts,
+    quoted with its title and message."""
+    windows = [
+        procs.TopWindow(pid=40, class_name="SDL_app", visible=True, title="Counter-Strike 2"),
+        procs.TopWindow(pid=40, class_name="#32770", visible=True, title="AfxHookSource2 Error",
+                        texts=("addresses.cpp(812): Could not find the address.", "")),
+        procs.TopWindow(pid=40, class_name="#32770", visible=False, title="hidden"),
+        procs.TopWindow(pid=41, class_name="#32770", visible=True, title="Somebody else's box", texts=("no",)),
+    ]
+    found = procs.dialogs_of([40], windows=lambda pids: windows)
+    assert found == ["AfxHookSource2 Error: addresses.cpp(812): Could not find the address."]
+    assert procs.dialogs_of([], windows=lambda pids: windows) == []
+    assert procs.dialogs_of([40], windows=lambda pids: 1 / 0) == []  # never raises

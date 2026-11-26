@@ -17,6 +17,7 @@ from demoreel.render.ingame import procs
 from demoreel.render.ingame.renderer import IngameRenderer
 from demoreel.render.ingame.settings import IngameSettings
 
+NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}  # no console windows
 SERVER = procs.GameProcess(10, r"D:\servers\cs2\game\bin\win64\cs2.exe",
                            r'"D:\servers\cs2\game\bin\win64\cs2.exe" -dedicated -usercon +map de_mirage -port 27015')
 GAME = procs.GameProcess(20, r"C:\Steam\steamapps\common\cs2\game\bin\win64\cs2.exe",
@@ -101,8 +102,8 @@ def test_command_lines_of_real_processes_can_be_read():
     exe, command_line = procs.process_details(os.getpid())
     assert exe and command_line and ("pytest" in command_line or "python" in command_line.lower())
     code = "import time; time.sleep(30)"
-    server = subprocess.Popen([sys.executable, "-c", code, "-dedicated", "+map", "de_test"])
-    game = subprocess.Popen([sys.executable, "-c", code, "-insecure"])
+    server = subprocess.Popen([sys.executable, "-c", code, "-dedicated", "+map", "de_test"], **NO_WINDOW)
+    game = subprocess.Popen([sys.executable, "-c", code, "-insecure"], **NO_WINDOW)
     try:
         assert procs.GameProcess(server.pid, *procs.process_details(server.pid)).dedicated is True
         assert procs.GameProcess(game.pid, *procs.process_details(game.pid)).dedicated is False

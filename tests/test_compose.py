@@ -36,6 +36,8 @@ from demoreel.compose.pipeline import finish, is_branded
 from demoreel.config import get_settings
 from demoreel.render import Clip, ClipSegment, RenderError, ffmpeg
 
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # ffmpeg must not open a console window on Windows
+
 
 def lavfi_clip(path, seconds=0.6, color="red", size="64x64", fps=10, audio=True):
     """A tiny real video made by ffmpeg itself (no fixtures on disk)."""
@@ -44,7 +46,7 @@ def lavfi_clip(path, seconds=0.6, color="red", size="64x64", fps=10, audio=True)
     if audio:
         args += ["-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}", "-c:a", "aac", "-shortest"]
     args += ["-c:v", "libx264", "-pix_fmt", "yuv420p", str(path)]
-    subprocess.run(args, check=True)
+    subprocess.run(args, check=True, creationflags=NO_WINDOW)
     return path
 
 
@@ -753,13 +755,14 @@ def lavfi_master(path, seconds, size="320x180"):
         "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
         "-filter_complex", "[0][1]overlay=x=140:y=70[a];[a][2]overlay=x='110+mod(t*40,90)':y=20[v]",
         "-map", "[v]", "-map", "3:a", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-shortest", str(path)], check=True)
+        "-c:a", "aac", "-shortest", str(path)], check=True, creationflags=NO_WINDOW)
     return path
 
 
 def gray_frame(path, t, width, height):
     raw = subprocess.run([ffmpeg.ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-ss", f"{t:.3f}", "-i", str(path),
-                          "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, check=True)
+                          "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, check=True,
+                         creationflags=NO_WINDOW)
     return np.frombuffer(raw.stdout, dtype=np.uint8).reshape(height, width).astype(int)
 
 

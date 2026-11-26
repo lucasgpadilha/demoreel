@@ -15,7 +15,7 @@ import re
 import signal
 import subprocess
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -243,7 +243,29 @@ def game_pids(marker: str | None = None) -> list[int]:
             and (wanted is None or wanted in _comparable(p.command_line or ""))]
 
 
-def _windows_dialogs(pids: set[int]) -> list[str]:
+@dataclass(frozen=True)
+class TopWindow:
+    """A top-level window as :func:`top_windows` sees it."""
+
+    pid: int
+    class_name: str
+    visible: bool
+    title: str
+    texts: tuple[str, ...] = ()  # the text of its static controls (a message box's message)
+
+
+def dialog_texts(windows: Iterable[TopWindow], pids: set[int]) -> list[str]:
+    """``"<title>: <text>"`` of the visible dialog boxes (window class ``#32770``) of these processes."""
+    out = []
+    for w in windows:
+        if w.pid in pids and w.visible and w.class_name == "#32770":
+            text = " ".join(t for t in w.texts if t)
+            out.append(f"{w.title}: {text}" if text else w.title or "(a dialog without text)")
+    return out
+
+
+def top_windows(pids: set[int]) -> list[TopWindow]:
+    """The top-level windows of these processes, with the static texts of their dialogs. Windows only."""
     import ctypes
     from ctypes import wintypes
 
@@ -272,14 +294,17 @@ def _windows_dialogs(pids: set[int]) -> list[str]:
         user32.GetClassNameW(hwnd, buffer, 64)
         return buffer.value
 
-    found: list[str] = []
+    found: list[TopWindow] = []
 
     def each_window(hwnd, _lparam) -> bool:
         try:
             pid = wintypes.DWORD(0)
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if pid.value in pids and user32.IsWindowVisible(hwnd) and class_of(hwnd) == "#32770":  # a dialog
-                lines: list[str] = []
+            if pid.value not in pids:
+                return True
+            cls, visible = class_of(hwnd), bool(user32.IsWindowVisible(hwnd))
+            lines: list[str] = []
+            if visible and cls == "#32770":  # a dialog: read its message too
 
                 def each_child(child, _lp) -> bool:
                     if class_of(child) == "Static":
@@ -289,8 +314,8 @@ def _windows_dialogs(pids: set[int]) -> list[str]:
                     return True
 
                 user32.EnumChildWindows(hwnd, enum_proc(each_child), 0)
-                title = text_of(hwnd)
-                found.append(f"{title}: {' '.join(lines)}" if lines else title or "(a dialog without text)")
+            found.append(TopWindow(pid=pid.value, class_name=cls, visible=visible, title=text_of(hwnd),
+                                   texts=tuple(lines)))
         except Exception:  # noqa: BLE001 - one odd window must not stop the search
             pass
         return True
@@ -299,14 +324,16 @@ def _windows_dialogs(pids: set[int]) -> list[str]:
     return found
 
 
-def dialogs_of(pids: Iterable[int]) -> list[str]:
+def dialogs_of(pids: Iterable[int],
+               windows: Callable[[set[int]], Iterable[TopWindow]] | None = None) -> list[str]:
     """``"<title>: <text>"`` of every dialog box (an error box, typically) shown by these processes. Windows
-    only; elsewhere, and when windows cannot be listed, ``[]``. Never raises."""
+    only (``windows`` replaces the real window list, for tests); elsewhere, and when windows cannot be listed,
+    ``[]``. Never raises."""
     wanted = {int(p) for p in pids}
-    if sys.platform != "win32" or not wanted:
+    if not wanted or (windows is None and sys.platform != "win32"):
         return []
     try:
-        return _windows_dialogs(wanted)
+        return dialog_texts((windows or top_windows)(wanted), wanted)
     except Exception:  # noqa: BLE001
         return []
 
@@ -319,9 +346,11 @@ def game_dialog(marker: str | None) -> str | None:
 
 
 def popen_group_kwargs() -> dict:
-    """``subprocess.Popen`` keyword arguments that make :func:`kill_process_tree` reliable."""
+    """``subprocess.Popen`` keyword arguments that make :func:`kill_process_tree` reliable. On Windows also
+    ``CREATE_NO_WINDOW``: the game and HLAE are window programs, for which it changes nothing, while a console
+    program started this way (a test's stand-in for the game) does not open a console window."""
     if sys.platform == "win32":
-        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | _NO_WINDOW}
     return {"start_new_session": True}
 
 

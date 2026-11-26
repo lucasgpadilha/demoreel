@@ -18,6 +18,8 @@ from demoreel.render.base import Clip, ClipSegment
 from demoreel.render.ingame import encode, launcher, plugin, procs
 from demoreel.render.ingame.settings import IngameSettings
 
+# Children of these tests never open a console window (the suite may run without a console of its own).
+NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 THEIR_DLL = b"MZ" + b"\x01" * plugin.MIN_LIBRARY_BYTES  # CS Demo Manager's copy, not the same bytes as ours
 
 
@@ -115,7 +117,7 @@ KILLED = textwrap.dedent("""
 def kill_mid_recording(settings: IngameSettings) -> None:
     run = subprocess.run([sys.executable, "-c", KILLED, str(settings.cs2_dir), str(settings.plugin_dir),
                           str(settings.data_dir), RECORDED_SETTINGS.decode()], capture_output=True, text=True,
-                         timeout=60)
+                         timeout=60, **NO_WINDOW)
     assert run.returncode == 3 and "recording" in run.stdout, run.stderr
 
 
@@ -168,7 +170,7 @@ def kill_mid_recording_with(settings: IngameSettings) -> None:
         'select_plugin_binary(plugins, "win32"', f'select_plugin_binary(plugins, "{settings.platform}"')
     plugin.plugin_settings_path(settings).parent.mkdir(parents=True, exist_ok=True)
     run = subprocess.run([sys.executable, "-c", script, str(settings.cs2_dir), str(settings.plugin_dir),
-                          str(settings.data_dir), "{}"], capture_output=True, text=True, timeout=60)
+                          str(settings.data_dir), "{}"], capture_output=True, text=True, timeout=60, **NO_WINDOW)
     assert run.returncode == 3, run.stderr
 
 
@@ -316,7 +318,7 @@ def _alive(pid: int) -> bool:
 def test_a_game_started_by_demoreel_dies_when_demoreel_is_killed():
     """What `p.terminate()` of a worker, a closed console or a crash look like from the game's side: the
     process that started it is gone, at once and without cleaning up. A sleeping Python child stands in for CS2."""
-    parent = subprocess.Popen([sys.executable, "-c", PARENT], stdout=subprocess.PIPE, text=True)
+    parent = subprocess.Popen([sys.executable, "-c", PARENT], stdout=subprocess.PIPE, text=True, **NO_WINDOW)
     child_pid = None
     try:
         child_pid = int(parent.stdout.readline())
