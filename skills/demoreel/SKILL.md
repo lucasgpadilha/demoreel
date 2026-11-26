@@ -85,7 +85,7 @@ are kept and flagged `stale`; render again.
 - A segment can be filmed from a fixed spot instead of a player: give it `camera` = `{x, y, z, pitch, yaw}`
   and no `pov_steamid`. Get the numbers in CS2: watch the demo, fly the free camera to the spot, type
   `spec_pos` in the console; it prints `spec_goto x y z pitch yaw`. Fixed cameras are filmed by the in-game
-  renderer only.
+  renderer only; a 2D replay shows the whole map during those segments and says so in the job's `warnings`.
 
 ```json
 {"match_id": "m_…", "title": "The plant, seen from the A site balcony", "category": "play",

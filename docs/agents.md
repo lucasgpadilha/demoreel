@@ -86,7 +86,9 @@ Also: prompt `make_highlight_reel(match_id, player?)` and resource `demoreel://m
 
 Limits: ≤ 40 segments, ≤ 300 s per highlight, each segment ≥ 0.25 s and inside the demo. A segment is
 watched from a player or from a fixed camera, never both (`spec_pos` in the CS2 console prints the camera's
-five numbers). A camera's `x`, `y` and `z` are finite and within ±16384, its `pitch` within -90..90.
+five numbers). A camera's `x`, `y` and `z` are finite and within ±16384, its `pitch` within -90..90. Fixed
+cameras are filmed by the in-game renderer only: a 2D replay shows the whole map during those segments and
+says so in the job result's `warnings`.
 
 ## Example session
 

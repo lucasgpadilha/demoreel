@@ -29,7 +29,17 @@ import skia
 from ...analysis.schema import KillEvent, MatchAnalysis, RoundSummary
 from ...brand import brand_for
 from .. import ffmpeg, maps
-from ..base import Availability, Clip, ClipSegment, RenderCancelled, RenderError, RenderJob, RenderResult
+from ..base import (
+    Availability,
+    Clip,
+    ClipSegment,
+    RenderCancelled,
+    RenderError,
+    RenderJob,
+    RenderResult,
+    is_camera_view,
+    player_view,
+)
 from . import camera as cam
 from .canvas import argb, clamp, ease_out
 from .data import Events, SegmentData, Track, load_events, load_segment
@@ -121,13 +131,15 @@ class _Session:
         from ...compose.overlay import clip_info  # the same words as the first-person HUD
 
         info = clip_info(clip, self.analysis, self.brand.locale)
-        pov = next((s.pov_steamid for s in clip.segments if s.pov_steamid), None)
+        # The clip's player: a fixed camera (``cam:…``) is a point of view, but nobody's play.
+        pov = next((player_view(s.pov_steamid) for s in clip.segments if player_view(s.pov_steamid)), None)
         segments: list[_SegmentPlan] = []
         offset = 0
         kill_frames: list[int] = []
         for seg in clip.segments:
             end = max(seg.end_tick, seg.start_tick + 1)
-            mine = [k for k in info.kill_ticks if seg.start_tick < k <= end] if seg.pov_steamid == pov else []
+            mine = ([k for k in info.kill_ticks if seg.start_tick < k <= end]
+                    if player_view(seg.pov_steamid) == pov else [])
             shown, linear = frame_ticks(seg.start_tick, end, seg.speed, self.tickrate, self.fps, mine)
             kill_frames.extend(offset + first_frame_at(shown, k) for k in mine)
             segments.append(_SegmentPlan(seg, shown, linear, offset))
@@ -202,7 +214,8 @@ class _Session:
 
     def _scene(self, cp: _ClipPlan, sp: _SegmentPlan, data: SegmentData) -> Scene:
         seg, tr = sp.seg, self.tickrate
-        pov = data.tracks.get(seg.pov_steamid) if seg.pov_steamid else None
+        who = player_view(seg.pov_steamid)
+        pov = data.tracks.get(who) if who else None
         flash_left, flash_total, busy = {}, {}, {}
         for pid, t in data.tracks.items():
             if (t.flash > 0.05).any():
@@ -233,8 +246,7 @@ class _Session:
             at = data.tracks.get(k.attacker.steamid) if k.attacker is not None and not k.is_suicide else None
             if at is not None and at.present[i]:
                 ax, ay = self.map.to_radar(float(at.x[i]), float(at.y[i]))
-            mine = seg.pov_steamid is not None and k.attacker is not None and k.attacker.steamid == seg.pov_steamid \
-                and k.tick in numbers
+            mine = who is not None and k.attacker is not None and k.attacker.steamid == who and k.tick in numbers
             cp.trace.marks.append(Mark(
                 tick=k.tick, x=vx, y=vy, lower=self.map.is_lower(float(vt.z[i])), side=k.victim.side, ax=ax, ay=ay,
                 attacker_side=k.attacker.side if k.attacker else None, pov=mine,
@@ -402,7 +414,7 @@ class _Session:
         self.spent["load"] += time.perf_counter() - t0
         t_draw = time.perf_counter() - self.spent["encode"]
         n = len(sp.shown)
-        pov = seg.pov_steamid
+        pov = player_view(seg.pov_steamid)
         rnd = sc.rnd
         # the watched player's team is the left one (as in the first-person HUD); CT without a POV
         left_side = "CT"
@@ -478,9 +490,30 @@ class _Session:
         if self.writer is None:
             raise RenderError("Nothing to render: the clips have no segments.")
         ffmpeg.close_writer(self.writer, "radar video encode")
+        details = {"frames": self.frames_written, "layout": self.layout.kind,
+                   "seconds": {k: round(v, 2) for k, v in self.spent.items()}}
+        notes = camera_notes(self.job.clips)
+        if notes:
+            details["warnings"] = notes
         return RenderResult(duration_s=self.frames_written / self.fps, width=self.w, height=self.h, fps=self.fps,
-                            details={"frames": self.frames_written, "layout": self.layout.kind,
-                                     "seconds": {k: round(v, 2) for k, v in self.spent.items()}})
+                            details=details)
+
+
+def camera_notes(clips: list[Clip]) -> list[str]:
+    """What a 2D replay shows differently from the request: segments set to a fixed camera, which only the game
+    can film from. The replay shows the whole map there."""
+    notes = []
+    for c, clip in enumerate(clips):
+        segs = [str(j) for j, s in enumerate(clip.segments) if is_camera_view(s.pov_steamid)]
+        if not segs:
+            continue
+        where = f"Segment {segs[0]}" if len(segs) == 1 else f"Segments {', '.join(segs)}"
+        if len(clips) > 1:
+            where += f" of clip {c + 1}"
+        notes.append(f"{where} {'is' if len(segs) == 1 else 'are'} watched from a fixed camera, which only the "
+                     "in-game renderer can film: this 2D replay shows the whole map there. Render with "
+                     "renderer='ingame' to see the camera's view.")
+    return notes
 
 
 def _autofit(name: str, data: SegmentData) -> maps.MapInfo:

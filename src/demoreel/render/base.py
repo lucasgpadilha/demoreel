@@ -68,6 +68,11 @@ def player_view(view: str | None) -> str | None:
     return None if not view or view.startswith(CAMERA_VIEW_PREFIX) else view
 
 
+def is_camera_view(view: str | None) -> bool:
+    """True for a fixed camera point of view (``cam:…``)."""
+    return bool(view) and view.startswith(CAMERA_VIEW_PREFIX)
+
+
 def segment_view(seg: Any) -> str | None:
     """Point of view of a stored segment (dict) or a ``HighlightSegment``: its player, else its fixed camera."""
     get = seg.get if isinstance(seg, dict) else lambda k: getattr(seg, k, None)

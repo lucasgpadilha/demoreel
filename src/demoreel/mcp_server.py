@@ -369,6 +369,8 @@ def build_server() -> MCPServer:
                "error": j.error, **extra}
         if j.result:
             out.update({k: v for k, v in j.result.items() if k in {"video_url", "thumbnail_url", "duration_s"}})
+            if j.result.get("warnings"):  # e.g. a fixed camera that a 2D replay cannot show
+                out["warnings"] = j.result["warnings"]
         if not j.done:
             out["next"] = f"call get_job('{j.id}', wait_seconds=30) until done"
         return out
