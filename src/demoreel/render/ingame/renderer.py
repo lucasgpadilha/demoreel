@@ -418,7 +418,6 @@ class IngameRenderer:
             # 4. Encode ----------------------------------------------------------------------------------
             has_layer = installed is not None and installed.vulkan_layer_installed
             swap = _flag(extra, "ingame_swap_red_blue", settings.is_linux and not has_layer)
-            take_frames: list[int] | None = None
             try:
                 if hlae:
                     encoded = encode.mux_hlae_takes(
@@ -426,7 +425,6 @@ class IngameRenderer:
                         crf=options.crf, cancelled=job.cancelled,
                         progress=lambda done, total: job.progress(
                             0.70 + 0.25 * done / max(1, total), f"Joining take {min(done + 1, total)}/{total}"))
-                    take_frames = encoded.take_frames
                 else:
                     encoded = encode.encode_takes(
                         settings, names, job.work_dir / "takes", width=width, height=height, fps=fps,
@@ -458,10 +456,11 @@ class IngameRenderer:
                 "game_seconds": round(game_seconds, 1) if game else None, "launches": len(batches),
                 "warnings": warnings,
                 "frame_format": "video" if hlae else action_options.frame_format,
-                # The tick ranges the video covers, in order: composition maps demo ticks to video time with it.
-                # HLAE reports the frames it really wrote per take; the game's recorder is trusted to the plan.
+                # The tick ranges the video covers, in order: composition maps demo ticks to video time with it,
+                # so each take counts with the frames it really has (a take cut short moves all that follows).
                 "spans": [{"start_tick": seq.start_tick, "end_tick": seq.end_tick,
-                           "frames": take_frames[i] if take_frames else actions.expected_frames([seq], fps, tickrate)}
+                           "frames": encoded.take_frames[i] if encoded.take_frames
+                           else actions.expected_frames([seq], fps, tickrate)}
                           for i, seq in enumerate(plan.sequences)],
             })
 

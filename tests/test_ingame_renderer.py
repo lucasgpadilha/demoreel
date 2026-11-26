@@ -74,11 +74,14 @@ class FakeGame:
     frames + audio of every ``startmovie`` found in the actions file."""
 
     def __init__(self, settings: IngameSettings, *, write: bool = True, returncode: int = 0,
-                 skip_names: tuple[str, ...] = ()) -> None:
+                 skip_names: tuple[str, ...] = (), short: dict[str, int] | None = None,
+                 duration_s: float = 42.0) -> None:
         self.settings, self.write, self.returncode, self.skip_names = settings, write, returncode, skip_names
+        self.short = short or {}  # take name -> frames the game "drops" at its end
+        self.duration_s = duration_s
         self.calls: list[dict] = []
 
-    def __call__(self, command, *, env, timeout_s, cancelled, on_poll, log_path, kill_names):
+    def __call__(self, command, *, env, timeout_s, cancelled, on_poll, log_path, kill_names, **kwargs):
         from PIL import Image
 
         demo = Path(command[command.index("+playdemo") + 1])
@@ -101,7 +104,7 @@ class FakeGame:
                 name = next(a["cmd"].split()[1] for a in sequence["actions"] if a["cmd"].startswith("startmovie"))
                 if name in self.skip_names:
                     continue
-                frames = round((ticks["endmovie"] - ticks["startmovie"]) / 64 * 30)
+                frames = round((ticks["endmovie"] - ticks["startmovie"]) / 64 * 30) - self.short.get(name, 0)
                 for i in range(1, frames + 1):
                     Image.new("RGB", (128, 72), (0, 120, 255)).save(tga_dir / f"{name}{i:08d}.tga", format="TGA")
                 with wave.open(str(wav_dir / f"{name}.wav"), "wb") as wav:
@@ -110,7 +113,7 @@ class FakeGame:
                     wav.setframerate(44100)
                     wav.writeframes(b"\x00\x00\x00\x00" * int(44100 * frames / 30))
             on_poll(5.0)  # the renderer's poller sees frames on disk
-        return launcher.GameRun(returncode=self.returncode, duration_s=42.0, output_tail="")
+        return launcher.GameRun(returncode=self.returncode, duration_s=self.duration_s, output_tail="")
 
 
 def renderer_for(settings: IngameSettings, game, *, cs2_running=False, steam_running=True,
@@ -288,6 +291,19 @@ def test_render_starts_the_game_again_after_a_take_that_plays_past_the_end_of_th
     assert result.details["warnings"] == []
     # and the game folder is left as it was found
     assert settings.gameinfo_path.read_bytes() == GAMEINFO and not settings.plugin_install_dir.exists()
+
+
+def test_a_take_that_came_out_short_counts_with_the_frames_it_has(env):
+    """Composition places every take from the frame counts stored with the footage: the plan's numbers would
+    put the HUD and captions of every later take late by the frames the game did not write."""
+    settings, demo, tmp_path = env
+    add_plugin(settings)
+    game = FakeGame(settings, short={"1-sequence": 4})
+    clips = [Clip(segments=[ClipSegment(8000, 8064, STEAM_A)]), Clip(segments=[ClipSegment(9000, 9064, STEAM_B)])]
+    result = renderer_for(settings, game).render(make_job(demo, tmp_path, clips))
+    assert [s["frames"] for s in result.details["spans"]] == [26, 30]
+    assert result.details["frames"] == 56 and result.details["expected_frames"] == 60
+    assert result.duration_s == pytest.approx(56 / 30)
 
 
 def test_render_restores_everything_when_the_game_wrote_nothing(env):

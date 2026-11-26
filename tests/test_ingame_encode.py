@@ -175,6 +175,7 @@ def test_takes_are_encoded_joined_and_thumbnailed_with_real_ffmpeg(tmp_path):
     assert [p.name for p in result.parts] == ["1-sequence.mp4", "2-sequence.mp4"]
     assert all(p.stat().st_size > 0 for p in result.parts)
     assert result.frames == 21 and result.duration_s == pytest.approx(0.7)
+    assert result.take_frames == [12, 9]  # what each take really has, for the spans stored with the footage
     assert progress == [(0, 2), (1, 2), (2, 2)]
 
     out, thumb = tmp_path / "final" / "reel.mp4", tmp_path / "final" / "reel.jpg"

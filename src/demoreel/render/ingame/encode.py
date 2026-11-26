@@ -196,6 +196,9 @@ class EncodeResult:
     frames: int
     duration_s: float
     warnings: list[str]
+    # Frames each take really has, in video order. A take can come out shorter than planned (it is cut at the
+    # first missing frame): composition places every later take, its HUD and captions, from these numbers.
+    take_frames: list[int] = field(default_factory=list)
 
 
 def encode_takes(settings: IngameSettings, names: Sequence[str], work_dir: Path, *, width: int, height: int,
@@ -215,7 +218,8 @@ def encode_takes(settings: IngameSettings, names: Sequence[str], work_dir: Path,
         warnings.extend(take.warnings)
     progress(len(takes), len(takes))
     frames = sum(t.frame_count for t in takes)
-    return EncodeResult(parts=parts, frames=frames, duration_s=frames / float(fps), warnings=warnings)
+    return EncodeResult(parts=parts, frames=frames, duration_s=frames / float(fps), warnings=warnings,
+                        take_frames=[t.frame_count for t in takes])
 
 
 def finalize(parts: Sequence[Path], out_path: Path, thumbnail_path: Path | None, duration_s: float) -> list[str]:
@@ -320,7 +324,7 @@ def video_info(path: Path) -> tuple[int, int, int]:
 
 @dataclass
 class HlaeResult(EncodeResult):
-    take_frames: list[int] = field(default_factory=list)  # frames actually recorded, per take, in video order
+    """What :func:`mux_hlae_takes` made; ``take_frames`` are the frames HLAE really wrote."""
 
 
 def mux_hlae_takes(hlae_dir: Path, names: Sequence[str], work_dir: Path, *, width: int, height: int, fps: int,
