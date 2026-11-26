@@ -167,7 +167,7 @@ repository is also a plugin marketplace that installs the skill and the MCP conn
 ```
 
 Other agents: copy `skills/demoreel/` into their skills folder, or build the zip that skill marketplaces take
-with `uv run python scripts/build_skill_zip.py` (→ `dist/demoreel-skill.zip`). Details in
+with `uv run python scripts/build_skill_zip.py` (→ `dist/demoreel.zip`). Details in
 [docs/agents.md](docs/agents.md#agent-skill-and-claude-code-plugin).
 
 ## Renderers

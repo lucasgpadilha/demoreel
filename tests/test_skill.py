@@ -27,16 +27,19 @@ def _skill(tmp_path: Path, frontmatter: str | None = None, body: str = "Body.\n"
     return d
 
 
-def test_the_repository_skill_packs_with_skill_md_at_the_root(tmp_path):
-    out = bsz.build(SKILL, tmp_path / "dist" / "demoreel-skill.zip")
+def test_the_repository_skill_packs_in_one_folder_named_after_it(tmp_path):
+    out = bsz.build(SKILL, tmp_path / "dist" / "demoreel.zip")
     with zipfile.ZipFile(out) as zf:
         names = zf.namelist()
-        assert names[0] == "SKILL.md"
-        assert all(n == "SKILL.md" or n.split("/")[0] in bsz.FOLDERS for n in names)
-        assert "references/rest-api.md" in names
-        for n in names:
+        # one top-level folder named after the skill, SKILL.md right inside it (what Agensi's scan checks)
+        assert names[:2] == ["demoreel/", "demoreel/SKILL.md"] and zf.getinfo("demoreel/").is_dir()
+        assert all(n.startswith("demoreel/") for n in names)
+        inside = [n.removeprefix("demoreel/") for n in names[1:]]
+        assert all(n == "SKILL.md" or n.split("/")[0] in bsz.FOLDERS for n in inside)
+        assert "demoreel/references/rest-api.md" in names
+        for n in names[1:]:
             assert b"\r\n" not in zf.read(n), f"{n} was packed with CRLF line endings"
-        fields = bsz.frontmatter(zf.read("SKILL.md").decode("utf-8"))
+        fields = bsz.frontmatter(zf.read("demoreel/SKILL.md").decode("utf-8"))
     assert fields["name"] == "demoreel"
     assert "CS2" in fields["description"] and len(fields["description"]) <= 1024
     assert "Not for CS:GO" in fields["description"]  # what it is not for, so it does not trigger on those
@@ -245,4 +248,4 @@ def test_the_command_line_reports_errors_without_a_traceback(tmp_path, capsys):
     good = _skill(tmp_path, name="good")
     assert bsz.main(["--skill", str(good), "--check"]) == 0
     assert bsz.main(["--skill", str(good), "--out", str(tmp_path / "good.zip")]) == 0
-    assert zipfile.ZipFile(tmp_path / "good.zip").namelist() == ["SKILL.md"]
+    assert zipfile.ZipFile(tmp_path / "good.zip").namelist() == ["good/", "good/SKILL.md"]

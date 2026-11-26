@@ -153,12 +153,12 @@ Copy `skills/demoreel/` into the folder your agent loads skills from (Claude Cod
 a zip get it from:
 
 ```bash
-uv run python scripts/build_skill_zip.py           # -> dist/demoreel-skill.zip (git-ignored)
+uv run python scripts/build_skill_zip.py           # -> dist/demoreel.zip (git-ignored)
 uv run python scripts/build_skill_zip.py --check   # only check the skill
 ```
 
-The zip has `SKILL.md` at its root and `references/` next to it, LF line endings and fixed timestamps (same
-sources, same bytes). The script refuses frontmatter without a valid `name` and `description`, files outside
+The zip holds one folder named after the skill, `demoreel/`, with `SKILL.md` and `references/` inside (the
+layout Agensi's upload scan checks), LF line endings and fixed timestamps (same sources, same bytes). The script refuses frontmatter without a valid `name` and `description`, files outside
 `references/`, `scripts/` and `assets/`, relative links that would break once zipped (link to the repository
 instead) and archives over 50 MB. `tests/test_skill.py` also checks that every tool the skill names exists in
 the MCP server and takes the parameters the skill passes it, that every REST route in
@@ -167,8 +167,10 @@ code; keep the skill in step when a tool, a parameter or a route changes. The sk
 demoreel 0.1.0 and later and tells the agent to compare that with the `version` of `GET /health` or
 `get_capabilities()`.
 
-Suggested listing text (free listing; links to this repository are fine, offers of paid versions elsewhere
-are not):
+Suggested listing text, for a free listing. Agensi's terms (6.3a) keep links to other sites, source
+repositories included, out of the listing text, and offers of paid versions sold elsewhere out of both the
+listing and the skill. The install steps and the link to this repository live in the skill itself, which
+Agensi allows:
 
 > **demoreel: CS2 demos to stats, highlight clips and videos**
 >
@@ -178,9 +180,9 @@ are not):
 > videos, either first-person game footage or a 2D radar replay, in 16:9 and 9:16 for phones.
 >
 > **Requirements.** demoreel 0.1.0 or newer, installed and running on Windows or Linux (macOS is not
-> supported), and an agent that can use MCP or call a REST API. Installing takes git and uv (`git clone
-> https://github.com/lucasgpadilha/demoreel`, `uv sync`, `uv run demoreel serve`); uv downloads Python, so the
-> first run needs internet, and so does the first 2D video (it fetches the map images). On Linux, also
+> supported), and an agent that can use MCP or call a REST API. Installing takes git and uv, and the skill
+> walks your agent through it (it asks before installing anything); uv downloads Python, so the first run
+> needs internet, and so does the first 2D video (it fetches the map images). On Linux, also
 > `sudo apt-get install -y libgl1 libegl1 libfontconfig1`. First-person video recording also needs
 > Counter-Strike 2 through Steam and a GPU on the same machine, plus the CS Demo Manager playback plugin, a
 > third-party binary (MIT) you download yourself; HLAE is optional. Stats, highlights and 2D videos need none
@@ -188,4 +190,5 @@ are not):
 > live match data. On Windows PowerShell, call `curl.exe` rather than `curl`.
 > The skill is instructions only (no binaries or scripts); it talks to your own demoreel server.
 >
-> Source, documentation and issues: https://github.com/lucasgpadilha/demoreel. Not affiliated with Valve.
+> Free and open source (MIT), by the author of demoreel; the skill points to its source and documentation.
+> Not affiliated with Valve.
