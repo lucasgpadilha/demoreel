@@ -364,6 +364,9 @@ def apply_candidate(h: Highlight, c, *, keep_cut: bool = False) -> None:
         h.edited = False
 
 
+HAND_MADE_KINDS = ("custom", "player_round")  # what create_highlight makes; every other kind comes from the analysis
+
+
 def cut_is_edited(h: Highlight) -> bool:
     """True when a person or an agent changed where this play is cut (so the model must not)."""
     if h.origin != "auto" or h.edited:
@@ -384,8 +387,9 @@ def rescore_match(s: Session, match_id: str) -> dict[str, Any]:
     found = plays + list(analysis.fails)  # fails need the demo to be found: the stored ones are kept as they are
     every = s.scalars(select(Highlight).where(Highlight.match_id == match_id)).all()
     rows = [h for h in every if h.origin == "auto"]
-    # A play that a person or an agent edited is no longer "auto", but it is still that play.
-    edited = [h for h in every if h.origin != "auto"]
+    # A play that a person or an agent edited is no longer "auto", but it is still that play. A clip made by
+    # hand never was one, even when it covers the same kills: the model leaves it alone and keeps its own play.
+    edited = [h for h in every if h.origin != "auto" and h.kind not in HAND_MADE_KINDS]
 
     def key(kind: str, rnd: int | None, steamid: str | None) -> tuple:
         return (rnd, steamid, kind if kind.startswith("fail_") else kind == "ninja_defuse")
@@ -472,9 +476,6 @@ def highlight_out(s: Session, h: Highlight, *, with_renders: bool = True) -> Hig
         duration_s=round(_segment_seconds(segments, tickrate), 1), origin=h.origin, version=h.version,  # type: ignore[arg-type]
         renders=renders, created_at=h.created_at, updated_at=h.updated_at,
     )
-
-
-HAND_MADE_KINDS = ("custom", "player_round")  # what create_highlight makes; every other kind comes from the analysis
 
 
 def create_highlight(s: Session, match_id: str, body: HighlightCreate) -> Highlight:

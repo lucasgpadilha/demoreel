@@ -669,6 +669,22 @@ def test_a_hand_made_clip_can_be_banter_and_what_the_analysis_found_cannot_be_mo
     assert client.post(f"{base}/highlights", json={**cut, "category": "meme"}).status_code == 422
 
 
+def test_rescoring_does_not_take_a_hand_made_clip_for_an_edited_play(client, match_id):
+    base = f"/api/v1/matches/{match_id}"
+    ace = next(h for h in client.get(f"{base}/highlights").json() if h["kind"] == "ace")
+    # The same round and player as the ace, clipped by hand: it shares every kill with the play the model finds.
+    made = client.post(f"{base}/highlights", json={"round": 1, "player_steamid": "ct1", "title": "mine",
+                                                   "tags": ["by hand"]}).json()
+    assert made["kind"] == "player_round" and set(made["kill_ticks"]) & set(ace["kill_ticks"])
+    out = client.post(f"{base}/rescore").json()
+    assert out["removed"] == 0 and out["added"] == 0
+    kept = client.get(f"/api/v1/highlights/{made['id']}").json()
+    assert kept["kind"] == "player_round" and kept["tags"] == ["by hand"] and kept["title"] == "mine"
+    assert client.get(f"/api/v1/highlights/{ace['id']}").status_code == 200  # the model's own play is still there
+    moved = client.patch(f"/api/v1/highlights/{made['id']}", json={"category": "fail"})
+    assert moved.status_code == 200 and moved.json()["category"] == "fail"
+
+
 
 def test_a_segment_can_be_watched_from_a_fixed_camera(client, match_id):
     base = f"/api/v1/matches/{match_id}"
