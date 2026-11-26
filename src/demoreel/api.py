@@ -493,11 +493,12 @@ def list_jobs(status: str | None = None, match_id: str | None = None, limit: int
 
 
 @api.get("/jobs/{job_id}", response_model=JobOut, tags=["jobs"], summary="Job status (supports long-polling)")
-def get_job(job_id: str, wait: float = Query(0, ge=0, le=120, description="Block up to this many seconds until "
-                                             "the job finishes, instead of polling in a loop.")) -> JobOut:
-    with session_scope() as s:
-        service.get_job(s, job_id)
-    return service.wait_job(job_id, wait)
+async def get_job(job_id: str, wait: float = Query(0, ge=0, le=120, description="Block up to this many seconds "
+                                                   "until the job finishes, instead of polling in a loop. The "
+                                                   "answer may come earlier when many clients are waiting: look "
+                                                   "at `done`.")) -> JobOut:
+    # async: a long wait must not hold one of the threads every other route shares
+    return await service.wait_job_async(job_id, wait)
 
 
 @api.post("/jobs/{job_id}/cancel", response_model=JobOut, tags=["jobs"], summary="Cancel a queued or running job")

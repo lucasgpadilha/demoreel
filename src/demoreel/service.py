@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import logging
 import shutil
+import threading
 import time
 import zipfile
 from collections.abc import Iterable
@@ -1119,15 +1120,52 @@ def get_job(s: Session, job_id: str) -> Job:
     return j
 
 
+MAX_THREAD_WAITS = 8  # threads parked in wait_job at once; the other routes share the same ~40
+MAX_TASK_WAITS = 256  # REST long-polls waiting at once (they hold no thread, only memory and a look every 0.5 s)
+_thread_waits = threading.BoundedSemaphore(MAX_THREAD_WAITS)
+_task_waits = 0  # only changed on the event loop
+
+
+def _look_at_job(job_id: str) -> JobOut:
+    with session_scope() as s:
+        return job_out(get_job(s, job_id))
+
+
 def wait_job(job_id: str, timeout_s: float) -> JobOut:
-    """Block (up to ``timeout_s``) until the job finishes. Lets agents avoid tight polling loops."""
+    """Block (up to ``timeout_s``) until the job finishes. Lets agents avoid tight polling loops.
+
+    When enough threads are already waiting, the answer comes at once: a long wait must not take every thread
+    the server has (``done`` says whether to ask again)."""
     deadline = time.monotonic() + max(0.0, min(timeout_s, 120.0))
-    while True:
-        with session_scope() as s:
-            out = job_out(get_job(s, job_id))
-        if out.done or time.monotonic() >= deadline:
-            return out
-        time.sleep(0.5)
+    out = _look_at_job(job_id)
+    if out.done or time.monotonic() >= deadline or not _thread_waits.acquire(blocking=False):
+        return out
+    try:
+        while not out.done and time.monotonic() < deadline:
+            time.sleep(0.5)
+            out = _look_at_job(job_id)
+        return out
+    finally:
+        _thread_waits.release()
+
+
+async def wait_job_async(job_id: str, timeout_s: float) -> JobOut:
+    """``wait_job`` without holding a thread while it waits (each look at the job borrows one for a moment)."""
+    import anyio
+
+    global _task_waits
+    deadline = time.monotonic() + max(0.0, min(timeout_s, 120.0))
+    out = await anyio.to_thread.run_sync(_look_at_job, job_id)
+    if out.done or time.monotonic() >= deadline or _task_waits >= MAX_TASK_WAITS:
+        return out
+    _task_waits += 1
+    try:
+        while not out.done and time.monotonic() < deadline:
+            await anyio.sleep(0.5)
+            out = await anyio.to_thread.run_sync(_look_at_job, job_id)
+        return out
+    finally:
+        _task_waits -= 1
 
 
 def scoreboard(analysis: MatchAnalysis) -> dict[str, Any]:
