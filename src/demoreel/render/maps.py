@@ -10,8 +10,10 @@ Only the numeric calibration lives here: radar pixel = ((x - pos_x) / scale, (po
 
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
+import re
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,6 +86,13 @@ def _download_radars() -> None:
         log.info("downloading radar images from %s", settings.radar_images_url)
         r = httpx.get(settings.radar_images_url, follow_redirects=True, timeout=60)
         r.raise_for_status()
+        want = (settings.radar_images_sha256 or "").strip().lower()
+        got = hashlib.sha256(r.content).hexdigest()
+        if want and got != want:
+            log.warning("radar images from %s have SHA-256 %s, not the expected %s: not used. Set "
+                        "DEMOREEL_RADAR_IMAGES_SHA256 together with DEMOREEL_RADAR_IMAGES_URL (empty skips the "
+                        "check); rendering without map background", settings.radar_images_url, got, want)
+            return
         with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
             for member in zf.namelist():
                 name = Path(member).name
@@ -93,8 +102,16 @@ def _download_radars() -> None:
         log.warning("could not download radar images (%s); rendering without map background", exc)
 
 
+_MAP_NAME = re.compile(r"^[a-z0-9_]+$")
+
+
 def radar_image(name: str, lower: bool = False) -> Path | None:
-    """Path of the radar PNG for a map (downloading the pack on first use), or None if unavailable."""
+    """Path of the radar PNG for a map (downloading the pack on first use), or None if unavailable.
+
+    The name comes from the demo (or a remote worker's analysis), so only plain map names are looked up: a
+    name such as ``../../x`` would otherwise read any PNG on the server."""
+    if not isinstance(name, str) or not _MAP_NAME.match(name):
+        return None
     fname = f"{name}_lower.png" if lower else f"{name}.png"
     p = cache_dir() / fname
     if not p.exists():

@@ -296,6 +296,63 @@ def test_the_mcp_key_is_checked_without_crashing_on_odd_headers(admin_key):
         assert r.status_code == 200 and "tools" in r.json()["result"]
 
 
+# ------------------------------------------------------------------------------------------- radar images
+
+def test_only_plain_map_names_are_looked_up():
+    from demoreel.render import maps
+
+    png = maps.cache_dir() / "de_testmap.png"
+    png.write_bytes(b"\x89PNG")
+    outside = get_settings().data_dir / "secret.png"
+    outside.write_bytes(b"\x89PNG")
+    try:
+        assert maps.radar_image("de_testmap") == png
+        for bad in ("../../secret", "..\\..\\secret", "de_x/../../secret", "DE_TESTMAP", "", None):
+            assert maps.radar_image(bad) is None, bad
+    finally:
+        png.unlink()
+        outside.unlink()
+
+
+def test_the_radar_pack_is_used_only_with_the_expected_hash(monkeypatch):
+    import hashlib
+    import io
+    import zipfile
+
+    from demoreel.render import maps
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("de_hashed.png", b"\x89PNG")
+    pack = buf.getvalue()
+
+    class Fake:
+        content = pack
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(maps.httpx, "get", lambda *a, **k: Fake())
+    monkeypatch.setattr(get_settings(), "offline", False)
+    target = maps.cache_dir() / "de_hashed.png"
+    try:
+        monkeypatch.setattr(get_settings(), "radar_images_sha256", "0" * 64)
+        monkeypatch.setattr(maps, "_download_attempted", False)
+        assert maps.radar_image("de_hashed") is None and not target.exists()
+        monkeypatch.setattr(get_settings(), "radar_images_sha256", hashlib.sha256(pack).hexdigest())
+        monkeypatch.setattr(maps, "_download_attempted", False)
+        assert maps.radar_image("de_hashed") == target
+    finally:
+        target.unlink(missing_ok=True)
+
+
+def test_the_default_radar_pack_is_a_fixed_release_with_a_hash():
+    from demoreel.config import Settings
+
+    s = Settings()
+    assert "/latest/" not in s.radar_images_url and len(s.radar_images_sha256) == 64
+
+
 # ------------------------------------------------------------------------------------------- docker
 
 def test_docker_compose_publishes_the_port_on_this_machine_only():

@@ -56,7 +56,12 @@ class Settings(BaseSettings):
     import_dirs: list[Path] = Field(default_factory=list,
                                     description="Server-side folders demos may be imported from by path.")
     offline: bool = Field(False, description="Never download anything (radar images).")
-    radar_images_url: str = "https://github.com/pnxenopoulos/awpy-data/releases/latest/download/images.zip"
+    # A fixed release and its hash, not "latest": what is downloaded is what was checked.
+    radar_images_url: str = "https://github.com/pnxenopoulos/awpy-data/releases/download/2000942/images.zip"
+    radar_images_sha256: str = Field(
+        "eefb39d6519b9dabca82100fc0958e8762550d85ad1aa344836d92ff363f531c",
+        description="SHA-256 the radar archive must have; set it together with radar_images_url (empty skips "
+                    "the check).")
     mcp_allowed_hosts: list[str] = Field(default_factory=list,
                                          description="Extra Host headers accepted by the MCP endpoint (and, "
                                                      "like allowed_hosts, by the rest of the server).")

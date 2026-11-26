@@ -15,7 +15,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg libgl1 libegl1 libfontconfig1 fonts-dejavu-core fonts-noto-core fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# A fixed uv release, not "latest": rebuilding the image must not pick up a new tool by surprise.
+COPY --from=ghcr.io/astral-sh/uv:0.12.10 /uv /usr/local/bin/uv
 
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md LICENSE ./
