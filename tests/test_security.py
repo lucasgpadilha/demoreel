@@ -557,6 +557,41 @@ def test_the_default_radar_pack_is_a_fixed_release_with_a_hash():
     assert "/latest/" not in s.radar_images_url and len(s.radar_images_sha256) == 64
 
 
+# ------------------------------------------------------------------------------------------- keys
+
+@pytest.fixture
+def fresh_settings(monkeypatch):
+    """get_settings() read again from the environment; the usual settings come back afterwards."""
+    for name in ("DEMOREEL_API_KEY", "DEMOREEL_ADMIN_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    get_settings.cache_clear()
+    yield monkeypatch
+    get_settings.cache_clear()
+
+
+def test_weak_keys_stop_the_server_without_being_repeated(fresh_settings):
+    from demoreel.config import ConfigError
+
+    for name, value, expected in (("DEMOREEL_ADMIN_KEY", "change-me", "example value"),
+                                  ("DEMOREEL_API_KEY", "abc123secret", "12 characters long")):
+        fresh_settings.setenv(name, value)
+        get_settings.cache_clear()
+        with pytest.raises(ConfigError) as err:
+            get_settings()
+        message = str(err.value)
+        assert name in message and expected in message and "openssl rand" in message
+        assert value not in message  # messages end up in logs
+        fresh_settings.delenv(name)
+
+
+def test_strong_and_empty_keys_are_accepted(fresh_settings):
+    fresh_settings.setenv("DEMOREEL_ADMIN_KEY", "x" * 16)
+    fresh_settings.setenv("DEMOREEL_API_KEY", "")  # `DEMOREEL_API_KEY=` in a compose file: no key
+    get_settings.cache_clear()
+    s = get_settings()
+    assert s.admin_key == "x" * 16 and s.api_key is None
+
+
 # ------------------------------------------------------------------------------------------- publish
 
 def test_a_publish_target_cannot_smuggle_an_ssh_option(monkeypatch):

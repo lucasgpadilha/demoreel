@@ -118,6 +118,29 @@ class Settings(BaseSettings):
             return None
         return names
 
+    def key_problems(self) -> list[str]:
+        """What is wrong with the configured keys (too short, still an example value). Never the key itself:
+        these messages end up in logs."""
+        fix = ("Generate one with `openssl rand -hex 24` or "
+               "`python -c \"import secrets; print(secrets.token_urlsafe(24))\"`.")
+        out = []
+        for name, value in (("DEMOREEL_API_KEY", self.api_key), ("DEMOREEL_ADMIN_KEY", self.admin_key)):
+            if not value:
+                continue
+            if value.strip().lower() in _EXAMPLE_KEYS:
+                out.append(f"{name} is still an example value from the documentation. {fix}")
+            elif len(value) < MIN_KEY_LENGTH:
+                out.append(f"{name} is {len(value)} characters long; a key needs at least {MIN_KEY_LENGTH}. {fix}")
+        return out
+
+
+MIN_KEY_LENGTH = 16
+_EXAMPLE_KEYS = {"change-me", "changeme", "change_me", "change-me-please", "your-key", "your-key-here", "secret"}
+
+
+class ConfigError(ValueError):
+    """The configuration cannot be used as it is; the message says what to change."""
+
 
 def host_name(value: str) -> str:
     """``Example.org:8000`` -> ``example.org``; ``::1`` and ``[::1]:8000`` -> ``[::1]``."""
@@ -132,5 +155,10 @@ def host_name(value: str) -> str:
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     s = Settings()
+    # An empty value (`DEMOREEL_API_KEY=` in a compose file) means no key, as it always did.
+    s.api_key, s.admin_key = s.api_key or None, s.admin_key or None
+    problems = s.key_problems()
+    if problems:  # a guessable key is worse than a clear stop: the server would look protected
+        raise ConfigError(" ".join(problems))
     s.data_dir.mkdir(parents=True, exist_ok=True)
     return s
