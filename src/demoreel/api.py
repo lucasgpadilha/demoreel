@@ -13,6 +13,7 @@ Typical flow::
 from __future__ import annotations
 
 import hmac
+import re
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -776,9 +777,13 @@ def _origin_of(url: str) -> str | None:
         u = urlparse(url.strip())
     except ValueError:
         return None
-    if u.scheme not in ("http", "https") or not u.netloc or "@" in u.netloc:
-        return None
-    return f"{u.scheme}://{u.netloc.lower()}"
+    netloc = u.netloc.lower()
+    if u.scheme not in ("http", "https") or not _NETLOC.match(netloc):
+        return None  # also keeps anything that could break out of a header value (spaces, ';', quotes)
+    return f"{u.scheme}://{netloc}"
+
+
+_NETLOC = re.compile(r"^[a-z0-9.\-]+(:\d{1,5})?$|^\[[0-9a-f:.]+\](:\d{1,5})?$")
 
 
 _POLICY_TTL_S = 5.0  # the brand kits are read again after this long
@@ -902,6 +907,48 @@ class _BrowserGuard:
             await send(message)
 
         await self.app(scope, receive, send_with_cors)
+
+
+def _frame_ancestors() -> str:
+    """CSP ``frame-ancestors``: this server, the kits' ``ui.embed.parents`` and DEMOREEL_FRAME_ANCESTORS."""
+    settings = get_settings()
+    key = (id(settings), tuple(settings.frame_ancestors), str(settings.data_dir))
+    hit = _policy_cache.get("frames")
+    if hit and hit[0] == key and time.monotonic() - hit[1] < _POLICY_TTL_S:
+        return hit[2]
+    if any(x.strip() == "*" for x in settings.frame_ancestors):
+        value = "*"
+    else:
+        sources = {o for o in map(_origin_of, settings.frame_ancestors) if o} | _embed_parents()
+        value = " ".join(["'self'", *sorted(sources)])
+    _policy_cache["frames"] = (key, time.monotonic(), value)
+    return value
+
+
+class _SecurityHeaders:
+    """Headers every answer carries unless the route set its own: no content sniffing, no full URLs in the
+    Referer sent to other sites, and only this server and the sites that embed it may frame its pages (a
+    page of another site framing the UI could trick clicks on it). A proxy in front may replace them, as the
+    mirror's Caddyfile does with its own frame-ancestors."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                h = MutableHeaders(scope=message)
+                h.setdefault("x-content-type-options", "nosniff")
+                h.setdefault("referrer-policy", "strict-origin-when-cross-origin")
+                if "content-security-policy" not in h:
+                    h["content-security-policy"] = f"frame-ancestors {_frame_ancestors()}"
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
 
 
 class _BodyTooLarge(Exception):
@@ -1075,6 +1122,7 @@ def create_app() -> FastAPI:
     app.add_middleware(_GzipApi)
     app.add_middleware(_RequestGate)
     app.add_middleware(_BrowserGuard)
+    app.add_middleware(_SecurityHeaders)
     app.add_middleware(_McpNoRedirect)
 
     @app.exception_handler(service.ServiceError)
@@ -1103,6 +1151,10 @@ def create_app() -> FastAPI:
                       and hmac.compare_digest(sig, service.sign_path(path, exp)))
             if not signed:
                 require_key(request)
+        if target.suffix.lower() == ".svg":
+            # A brand kit's SVG is served from the UI's own origin: opened directly, a script inside it could
+            # read the key the UI keeps in the browser. Sandboxed, it is only a picture.
+            return FileResponse(target, headers={"Content-Security-Policy": "sandbox"})
         return FileResponse(target)
 
     @app.get("/p/{highlight_id}", include_in_schema=False)
@@ -1140,7 +1192,8 @@ def create_app() -> FastAPI:
         page = _SHARE_PAGE.format(
             lang=html.escape(brand.locale or "en", quote=True), title=html.escape(title, quote=True),
             description=html.escape(" · ".join(bits), quote=True), site=html.escape(brand.name, quote=True),
-            media=media, target=html.escape(target, quote=True), target_js=_json.dumps(target))
+            media=media, target=html.escape(target, quote=True),
+            target_js=_json.dumps(target).replace("</", "<\\/"))  # "</script>" in a kit's URL ends no script
         return HTMLResponse(page)
 
     @app.get("/llms.txt", include_in_schema=False, response_class=PlainTextResponse)

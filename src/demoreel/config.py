@@ -29,6 +29,9 @@ class Settings(BaseSettings):
         "Host names this server answers to besides localhost, `host` and the host of `public_url` (a LAN "
         "address, a second domain…). While no key is set, a request naming any other host is refused: that "
         "stops a web page from reaching this server through a DNS trick. [\"*\"] accepts any name."))
+    frame_ancestors: list[str] = Field(default_factory=list, description=(
+        "Sites allowed to show this UI in an <iframe>, besides itself and the `ui.embed.parents` of the brand "
+        "kits. [\"*\"] allows any site."))
     cors_origins: list[str] = Field(default_factory=list, description=(
         "Other sites whose pages may call this API from the browser, e.g. [\"https://mixdavila.example\"]. "
         "This server's own names and the `ui.embed.parents` of the brand kits are always allowed; while a key "

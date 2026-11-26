@@ -281,6 +281,82 @@ def test_a_zip_without_a_demo_is_refused_and_removed(client):
     assert r.status_code == 400 and "no .dem" in r.json()["detail"]
 
 
+# ------------------------------------------------------------------------------------------- headers
+
+@pytest.fixture
+def kit():
+    """A brand kit on disk (the only one, so it is the active kit); removed afterwards."""
+    import json
+    import shutil
+
+    from demoreel import api
+
+    folder = get_settings().data_dir / "brands" / "mixdavila"
+    folder.mkdir(parents=True, exist_ok=True)
+
+    def write(**fields):
+        (folder / "brand.json").write_text(json.dumps({"name": "Mix da Vila", **fields}), encoding="utf-8")
+        api._policy_cache.clear()
+        return folder
+
+    yield write
+    shutil.rmtree(folder)
+    api._policy_cache.clear()
+
+
+def test_every_answer_carries_the_security_headers(client, kit, monkeypatch):
+    for path in ("/", "/api/v1/matches", "/health"):
+        r = client.get(path)
+        assert r.headers["x-content-type-options"] == "nosniff", path
+        assert r.headers["referrer-policy"] == "strict-origin-when-cross-origin"
+        assert r.headers["content-security-policy"] == "frame-ancestors 'self'"
+    kit(ui={"embed": {"parents": ["https://mixdavila.example"]}})
+    assert client.get("/").headers["content-security-policy"] == "frame-ancestors 'self' https://mixdavila.example"
+    monkeypatch.setattr(get_settings(), "frame_ancestors", ["https://other.example", "bad value; script-src *"])
+    from demoreel import api
+
+    api._policy_cache.clear()
+    assert client.get("/").headers["content-security-policy"] == (
+        "frame-ancestors 'self' https://mixdavila.example https://other.example")
+    monkeypatch.setattr(get_settings(), "frame_ancestors", ["*"])
+    api._policy_cache.clear()
+    assert client.get("/").headers["content-security-policy"] == "frame-ancestors *"
+
+
+def test_svg_files_of_a_kit_are_sandboxed(client, kit):
+    folder = kit(logo="logo.svg")
+    (folder / "logo.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+                                     encoding="utf-8")
+    r = client.get("/files/brands/mixdavila/logo.svg")
+    assert r.status_code == 200 and r.headers["content-security-policy"] == "sandbox"
+
+
+def test_the_share_page_never_ends_its_script_early(client, kit, sample_analysis):
+    from demoreel import service
+    from demoreel.db import Highlight, Match, init_db, now, session_scope
+
+    init_db()
+    with session_scope() as s:
+        m = Match(sha256=f"share-{now().timestamp()}", filename="x.dem", size_bytes=1, demo_path="demos/x.dem",
+                  status="ready", map="de_test")
+        s.add(m)
+        s.flush()
+        c = sample_analysis.highlights[0]
+        h = Highlight(match_id=m.id, kind=c.kind, title=c.title, description=c.description, origin="auto")
+        service.apply_candidate(h, c)
+        s.add(h)
+        s.flush()
+        match_id, hid = m.id, h.id
+    try:
+        kit(ui={"embed": {"share_base": "https://mixdavila.example/jogadas/</script><script>alert(1)//"}})
+        page = client.get(f"/p/{hid}").text
+        script = page.split("<script>", 1)[1]
+        assert "</script><script>alert" not in script and "<\\/script>" in script
+    finally:
+        with session_scope() as s:
+            service.delete_match(s, match_id)
+
+
 # ------------------------------------------------------------------------------------------- /mcp key
 
 def test_the_mcp_key_is_checked_without_crashing_on_odd_headers(admin_key):
