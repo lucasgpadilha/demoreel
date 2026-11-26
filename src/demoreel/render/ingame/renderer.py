@@ -299,6 +299,7 @@ class IngameRenderer:
     def _availability(self, settings: IngameSettings) -> Availability:
         details: dict[str, Any] = {}
         problems = self._static_problems(settings, details)
+        static = len(problems)  # what someone has to set up; everything after this can pass by itself
 
         if settings.cs2_dir is not None:
             try:
@@ -319,9 +320,12 @@ class IngameRenderer:
 
         recording = False
         try:
-            recording = launcher.RecordingLock(settings.lock_path).is_held_elsewhere() or (
-                settings.install_lock_path is not None
-                and launcher.RecordingLock(settings.install_lock_path).is_held_elsewhere())
+            # Held by another process: it is recording, and the game running is its game. Held by this one (a
+            # worker keeps it between its jobs): nothing of ours runs while this is asked, whatever runs is not.
+            if not launcher.held_here(settings.lock_path):
+                recording = launcher.RecordingLock(settings.lock_path).is_held_elsewhere() or (
+                    settings.install_lock_path is not None
+                    and launcher.RecordingLock(settings.install_lock_path).is_held_elsewhere())
         except Exception:  # noqa: BLE001
             recording = False
         details["recording_in_progress"] = recording
@@ -347,6 +351,10 @@ class IngameRenderer:
             problems.append(shared)
 
         details["problems"] = problems
+        # Problems that go away by themselves - the owner closes the game, Steam starts, disk is freed, the
+        # server stops, the interrupted recording is put back - as opposed to set-up that someone must fix. A job
+        # that needs the game waits in the queue for the first kind, and fails with the reason for the second.
+        details["transient"] = bool(problems) and static == 0
         return Availability(ok=not problems, reason=problems[0] if problems else "", details=details)
 
     # --- render ------------------------------------------------------------------------------------------

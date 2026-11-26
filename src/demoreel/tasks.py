@@ -74,6 +74,23 @@ def _recorder(ctx: jobs.JobContext, extra: dict) -> Iterator[None]:
         yield
 
 
+DEFER_WAIT_S = 10.0  # a job waiting for the game is looked at again this often, not every second
+
+
+def _recorder_state():
+    """The in-game renderer's availability, after putting back the CS2 folder of an interrupted recording when
+    that is all that stands in the way (it is done when the game is closed and nothing records)."""
+    renderer = get_renderer("ingame")
+    state = renderer.availability()
+    if not state.ok and state.details.get("interrupted_recording"):
+        recover = getattr(renderer, "recover_install", None)
+        if recover is not None:
+            for line in recover():
+                log.info("in-game recording: %s", line)
+            state = renderer.availability()
+    return state
+
+
 def _discard(*paths: Path | None) -> None:
     """Best-effort delete of partial outputs. A file can stay locked for a moment after an encoder is killed
     (Windows), and failing to clean up must never turn a cancellation into a failure."""
@@ -192,17 +209,23 @@ def _ingame_body(ctx: jobs.JobContext, job: RenderJob, *, match_id: str, brand, 
         raise RenderError("This clip lies outside the part of the demo that can be played back.")
     segments = [s for c in clips for s in c.segments]
     need_fps = masters.capture_fps_for(segments, opts.fps)
-    can_record = settings.ingame_enabled and get_renderer("ingame").availability().ok
+    recorder = _recorder_state() if settings.ingame_enabled else None
+    can_record = recorder is not None and recorder.ok
     recapture = bool(opts.extra.get("ingame_recapture")) and can_record
     kw = {"width": settings.ingame_capture_width, "height": settings.ingame_capture_height, "extra": opts.extra,
           "kills": masters.xray.match_kills(analysis), "tickrate": float(analysis.tickrate or 64)}
     m = None if recapture else masters.find_master(match_id, segments, min_fps=need_fps,
                                                    allow_lower_fps=not can_record, **kw)
     if m is None:
+        if recorder is not None and not recorder.ok:
+            if recorder.details.get("transient"):  # the owner is playing, Steam is closed...: wait in the queue
+                raise jobs.JobDeferred(f"Waiting to record: {recorder.reason}"[:255], wait_s=DEFER_WAIT_S)
+            raise RenderError("This clip needs footage that has not been recorded yet, and in-game recording "
+                              f"cannot run on this machine: {recorder.reason}")
         if not can_record:
             raise RenderError("This clip needs footage that has not been recorded yet, and this server cannot run "
-                              "CS2 (in-game recording is disabled or unavailable). Use the 2D renderer, or run a "
-                              "worker with the game: see docs/ingame-recording.md.")
+                              "CS2 (in-game recording is disabled: DEMOREEL_INGAME_ENABLED is not set). Use the 2D "
+                              "renderer, or run a worker with the game: see docs/ingame-recording.md.")
         m, details = _record(ctx, match_id=match_id, demo_path=job.demo_path, analysis=analysis, clips=clips,
                              fps=need_fps, extra=opts.extra, work_dir=job.work_dir)
     else:
@@ -260,6 +283,11 @@ def capture_match(ctx: jobs.JobContext) -> dict[str, Any]:
     try:
         # The whole match is one turn at the game: no other recording gets in between its sessions.
         with _recorder(ctx, extra):
+            state = _recorder_state()
+            if not state.ok:
+                if state.details.get("transient"):  # the owner is playing, Steam is closed...: wait in the queue
+                    raise jobs.JobDeferred(f"Waiting to record: {state.reason}"[:255], wait_s=DEFER_WAIT_S)
+                raise RenderError(f"In-game recording cannot run on this machine: {state.reason}")
             ctx.progress(0.01, f"Recording {len(clips)} plays with the game")
             done = 0
             for fps, group in groups.items():

@@ -195,6 +195,15 @@ class RecordingLock:
 
 
 _HELD: dict[tuple[str, int], RecordingLock] = {}  # the locks this process holds, by file and thread
+
+
+def held_here(path: Path | None) -> bool:
+    """Does this process hold the lock at ``path`` (through :func:`recording_lock`, in any thread)? A worker
+    holds it between jobs as well; what it sees running then is not its own recording."""
+    if path is None:
+        return False
+    key = os.path.normcase(os.path.abspath(path))
+    return any(name == key for name, _thread in list(_HELD))
 # Asking whether the lock is held (the doctor, an idle worker) takes it for an instant: that is not a recording.
 PROBE_GRACE_S = 0.25
 

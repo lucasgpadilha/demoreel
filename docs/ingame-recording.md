@@ -213,8 +213,12 @@ like its takes (`<n>-sequence…`) are deleted, then the folders left empty.
   game is recording the other workers of that machine leave those jobs in the queue - they run in the order
   they arrived, however many there are - and edit what is already recorded meanwhile. A match is one turn at the game, even when it needs two sessions (normal
   speed, then slow motion). Only a direct render (`demoreel render --renderer ingame`) waits, 30 min by
-  default. If CS2 is already open - your own game - the render is refused: demoreel never kills a game it did
-  not start.
+  default. If CS2 is already open - your own game - the game is never touched: demoreel never kills a game it
+  did not start. A queued job that needs the game then waits in the queue, in its place, and is looked at again
+  every 10 s, with the reason as its message ("Waiting to record: CS2 is already running…"); so does it while
+  Steam is closed, the CS2 drive is short of space, a dedicated server runs from the same folder or an
+  interrupted recording is being put back. What someone has to set up (the plugin file, CS2 not found, ffmpeg)
+  fails the job with that reason instead. A direct `demoreel render` reports it at once.
 - **Machines that host game servers.** A dedicated server (`cs2 -dedicated`) is a process with the same name
   as the game. demoreel tells them apart by the command line: servers do not count as "CS2 is already
   running", and when a recording is cancelled or times out only the game it started is closed - never a

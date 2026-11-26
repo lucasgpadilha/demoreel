@@ -149,10 +149,30 @@ def test_availability_ok_and_runtime_blockers(env):
     assert "Steam is not running" in renderer_for(settings, None, steam_running=False).availability().reason
     assert "already running" in renderer_for(settings, None, cs2_running=True).availability().reason
 
-    # CS2 running because *we* are recording (lock held) is not a reason to call the renderer unavailable.
-    with launcher.recording_lock(settings.lock_path):
+    # CS2 running because a worker is recording (another process holds the lock) is not a reason to call the
+    # renderer unavailable.
+    recording = launcher.RecordingLock(settings.lock_path)
+    assert recording.try_acquire()
+    try:
         busy = renderer_for(settings, None, cs2_running=True).availability()
+    finally:
+        recording.release()
     assert busy.ok is True and busy.details["recording_in_progress"] is True
+
+    # But a worker that holds the lock itself, between its jobs, is not recording: a game running then is the
+    # owner's, and a job that needs the game must wait for it.
+    with launcher.recording_lock(settings.lock_path):
+        mine = renderer_for(settings, None, cs2_running=True).availability()
+    assert not mine.ok and "already running" in mine.reason and mine.details["transient"] is True
+
+
+def test_availability_tells_passing_problems_from_set_up_ones(env):
+    settings, _, _ = env
+    assert renderer_for(settings, None).availability().details["transient"] is False  # no plugin: set-up
+    add_plugin(settings)
+    assert renderer_for(settings, None).availability().details["transient"] is False  # ok: nothing to wait for
+    assert renderer_for(settings, None, steam_running=False).availability().details["transient"] is True
+    assert renderer_for(settings, None, cs2_running=True).availability().details["transient"] is True
 
 
 def test_availability_never_raises_and_reports_missing_cs2(tmp_path):

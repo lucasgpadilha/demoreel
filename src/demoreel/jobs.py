@@ -41,6 +41,9 @@ _STOP = threading.Event()
 STOPPED_MESSAGE = "Interrupted: the worker was stopped. It runs again when a worker is up."
 
 
+_BACK_OFF = {"s": 0.0}  # the longest wait the jobs deferred since the last look at the queue asked for
+
+
 def request_stop() -> None:
     _STOP.set()
 
@@ -55,7 +58,13 @@ class JobCancelled(Exception):
 
 class JobDeferred(Exception):
     """Raised by a handler that cannot run its job on this machine right now (the game is recording something
-    else). The job goes back to the queue and keeps its place; it is neither a failure nor an attempt."""
+    else, the owner is playing). The job goes back to the queue and keeps its place; it is neither a failure nor
+    an attempt. ``wait_s``: how long this worker lets the queue be before it looks again (it would only take
+    the same job back)."""
+
+    def __init__(self, message: str = "", wait_s: float = 0.0) -> None:
+        super().__init__(message)
+        self.wait_s = float(wait_s)
 
 
 @dataclass
@@ -272,6 +281,7 @@ def _run(job: Job) -> bool:
             return True  # not cancelled by anybody: the worker is stopping, the job waits for the next one
     except JobDeferred as exc:
         if _defer(job.id, str(exc)):
+            _BACK_OFF["s"] = max(_BACK_OFF["s"], exc.wait_s)
             return False  # nothing ran: the caller waits a moment before looking at the queue again
         status, error = "canceled", "Canceled"
     except Exception as exc:  # noqa: BLE001 - job boundary: record and keep the worker alive
@@ -323,7 +333,8 @@ def worker_loop(capabilities: list[str], poll_s: float = 1.0, stop: Callable[[],
             requeue_stale()
             last_sweep = time.monotonic()
         if not run_one(worker_id, capabilities):
-            _STOP.wait(poll_s)
+            wait, _BACK_OFF["s"] = max(poll_s, _BACK_OFF["s"]), 0.0
+            _STOP.wait(wait)
     log.info("worker %s stopped", worker_id)
 
 
