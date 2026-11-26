@@ -190,6 +190,14 @@ def test_takes_are_encoded_joined_and_thumbnailed_with_real_ffmpeg(tmp_path):
     assert "Audio: aac" in probe.stderr and "48000 Hz" in probe.stderr
 
 
+def test_an_ffmpeg_error_about_a_unicode_file_name_is_reported_not_lost_in_decoding(tmp_path):
+    """ffmpeg writes UTF-8; read with the Windows code page, the byte 0x81 of "ā" raised UnicodeDecodeError."""
+    missing = tmp_path / "nāo-existe.mp4"
+    with pytest.raises(RenderError, match="probe failed") as excinfo:
+        ffmpeg.run(["-i", str(missing), "-f", "null", "-"], "probe")
+    assert "nāo-existe" in str(excinfo.value)
+
+
 def test_encode_fails_before_touching_ffmpeg_when_a_take_is_missing_and_honours_cancel(tmp_path):
     settings = make_settings(tmp_path)
     write_take(settings, "1-sequence", 3, real_images=True)

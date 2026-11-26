@@ -19,6 +19,9 @@ GAMEINFO = (
     "\t\t\tMod\t\tcsgo\r\n\t\t}\r\n\t}\r\n}\r\n"
 )
 MARKER = b"Game\tcsgo/csdm"
+# Not real libraries: only the header a library starts with, and the size of a real one.
+DLL = b"MZ" + b"\0" * plugin.MIN_LIBRARY_BYTES
+SO = b"\x7fELF" + b"\0" * plugin.MIN_LIBRARY_BYTES
 
 
 def make_settings(tmp_path: Path, platform: str = "win32", **kwargs) -> IngameSettings:
@@ -144,6 +147,49 @@ def test_crash_recovery_with_a_corrupt_backup_removes_only_our_line(tmp_path):
     assert gameinfo.read_bytes() == GAMEINFO.encode()
 
 
+@pytest.mark.parametrize("left", [b"", b"\r\n", GAMEINFO.encode()[:40]], ids=["empty", "blank", "cut short"])
+def test_a_gameinfo_left_empty_or_cut_short_is_not_taken_for_a_clean_one(tmp_path, left):
+    """An interrupted write leaves a broken file without our line: the backup must come back, not be thrown
+    away (CS2 would only start again after Steam verified the game files)."""
+    gameinfo = make_settings(tmp_path).gameinfo_path
+    plugin.backup_path(gameinfo).write_bytes(GAMEINFO.encode())
+    gameinfo.write_bytes(left)
+    assert plugin.recover_gameinfo(gameinfo) == "restored"
+    assert gameinfo.read_bytes() == GAMEINFO.encode() and not plugin.backup_path(gameinfo).exists()
+
+    gameinfo.unlink()  # gone altogether
+    plugin.backup_path(gameinfo).write_bytes(GAMEINFO.encode())
+    assert plugin.recover_gameinfo(gameinfo) == "restored" and gameinfo.read_bytes() == GAMEINFO.encode()
+
+
+def test_a_broken_gameinfo_without_a_usable_backup_is_left_for_steam_to_repair(tmp_path):
+    gameinfo = make_settings(tmp_path).gameinfo_path
+    gameinfo.write_bytes(b"")
+    plugin.backup_path(gameinfo).write_bytes(b"")
+    assert plugin.recover_gameinfo(gameinfo) == "damaged"
+    assert plugin.backup_path(gameinfo).exists()  # nothing is thrown away
+
+
+def test_recovery_keeps_a_cs2_update_that_came_after_the_backup(tmp_path):
+    """demoreel died, CS2 updated gameinfo.gi, CS Demo Manager put its line in the new file: the old backup must
+    not be written over the update; only the line comes out."""
+    gameinfo = make_settings(tmp_path).gameinfo_path
+    plugin.backup_path(gameinfo).write_bytes(GAMEINFO.encode())
+    updated = GAMEINFO.replace("Counter-Strike 2", "Counter-Strike 2 (1.42)")
+    gameinfo.write_bytes(plugin.patch_gameinfo_text(updated)[0].encode())
+    assert plugin.recover_gameinfo(gameinfo) == "restored"
+    assert gameinfo.read_bytes() == updated.encode()
+    assert not plugin.backup_path(gameinfo).exists()
+
+
+def test_a_broken_gameinfo_at_the_end_of_a_session_gets_the_original_back(tmp_path):
+    gameinfo = make_settings(tmp_path).gameinfo_path
+    original = gameinfo.read_bytes()
+    with plugin.patched_gameinfo(gameinfo):
+        gameinfo.write_bytes(b"")
+    assert gameinfo.read_bytes() == original
+
+
 # --- the plugin's settings file ---------------------------------------------------------------------------
 
 # What the plugin writes (settings.cpp, `dump(2)`), shortened. The owner of this one likes the voice indicator.
@@ -255,10 +301,10 @@ def test_select_plugin_binary(tmp_path):
     plugin_dir = tmp_path / "plugins"
     plugin_dir.mkdir()
     assert plugin.select_plugin_binary(plugin_dir, "win32", 14197) is None
-    (plugin_dir / "server.dll").write_bytes(b"placeholder, not a real library")
-    (plugin_dir / "server_14168.dll").write_bytes(b"placeholder, not a real library")
+    (plugin_dir / "server.dll").write_bytes(DLL)
+    (plugin_dir / "server_14168.dll").write_bytes(DLL)
     (plugin_dir / "server_14030.dll").write_bytes(b"")  # empty files are ignored
-    (plugin_dir / "libserver.so").write_bytes(b"other platform")
+    (plugin_dir / "libserver.so").write_bytes(SO)
 
     assert plugin.list_plugin_binaries(plugin_dir, "win32").keys() == {"latest", "14168"}
     assert plugin.select_plugin_binary(plugin_dir, "win32", 14197).version == "latest"
@@ -287,19 +333,46 @@ def test_missing_plugin_instruction_names_source_and_destination(tmp_path):
     assert "static/cs2/libserver.so" in linux and "libcsdm_vulkan_layer.so" in linux
 
 
+def test_a_web_page_saved_as_the_plugin_is_refused_with_the_reason(tmp_path):
+    """The usual mistake: the GitHub page of server.dll saved under its name. Without a check it surfaced five
+    minutes later as "the plugin did not load"."""
+    settings = make_settings(tmp_path)
+    (settings.plugin_dir / "server.dll").write_bytes(b"<!DOCTYPE html>\n<html lang='en'>" + b" " * 70000)
+    (settings.plugin_dir / "server_14168.dll").write_bytes(b"MZ\x90\x00")  # a download cut short
+    assert plugin.list_plugin_binaries(settings.plugin_dir, "win32") == {}
+    assert plugin.select_plugin_binary(settings.plugin_dir, "win32", 14197) is None
+    text = plugin.missing_plugin_instruction(settings, 14197)
+    assert "server.dll` is not a Windows DLL" in text and "Download raw file" in text
+    assert "server_14168.dll` is only 4 bytes long" in text
+
+    (settings.plugin_dir / "server.dll").write_bytes(DLL)
+    assert plugin.select_plugin_binary(settings.plugin_dir, "win32", 14197).version == "latest"
+    assert plugin.library_problem(settings.plugin_dir / "server.dll", "linux").startswith("is not a Linux library")
+
+
+def test_patch_numbers_compare_by_minor_version_before_the_rest():
+    """The numbering only joins digits: 1.41.10.2 is 141102, a larger number than 1.42.0.1 (14201)."""
+    assert plugin.patch_key(141102) < plugin.patch_key(14201)
+    assert plugin.patch_key(14197) < plugin.patch_key(141102)
+    assert plugin.recommended_version(14201, [141102, 14196]) == "latest"  # a 1.41 build does not cover 1.42
+    assert plugin.recommended_version(141100, [141102, 14196]) == "141102"  # 1.41.10.0: after 1.41.9.6
+    assert plugin.recommended_version(14197, [141102, 14198]) == "14198"
+    assert plugin.patch_key(999) == (999,)
+
+
 # --- install / uninstall in a fake game tree --------------------------------------------------------------
 
 
 def test_plugin_session_installs_patches_and_cleans_up_on_windows_layout(tmp_path):
     settings = make_settings(tmp_path)
     original = settings.gameinfo_path.read_bytes()
-    (settings.plugin_dir / "server.dll").write_bytes(b"placeholder, not a real library")
+    (settings.plugin_dir / "server.dll").write_bytes(DLL)
     (settings.bin_dir / "csdm.log").write_text("stale log")
     binary = plugin.select_plugin_binary(settings.plugin_dir, "win32", 14197)
 
     with plugin.plugin_session(settings, binary) as installed:
         target = settings.csgo_dir / "csdm" / "bin" / "server.dll"
-        assert target.read_bytes() == b"placeholder, not a real library"
+        assert target.read_bytes() == DLL
         assert MARKER in settings.gameinfo_path.read_bytes()
         assert installed.gameinfo_patched and not installed.vulkan_layer_installed and installed.env == {}
         assert not (settings.bin_dir / "csdm.log").exists()  # stale plugin log removed like CSDM does
@@ -314,7 +387,7 @@ def test_plugin_session_installs_patches_and_cleans_up_on_windows_layout(tmp_pat
 def test_plugin_session_cleans_up_when_the_body_raises(tmp_path):
     settings = make_settings(tmp_path)
     original = settings.gameinfo_path.read_bytes()
-    (settings.plugin_dir / "server.dll").write_bytes(b"placeholder")
+    (settings.plugin_dir / "server.dll").write_bytes(DLL)
     binary = plugin.select_plugin_binary(settings.plugin_dir, "win32", None)
     with pytest.raises(RuntimeError):
         with plugin.plugin_session(settings, binary):
@@ -326,7 +399,7 @@ def test_plugin_session_cleans_up_when_the_body_raises(tmp_path):
 
 def test_plugin_session_puts_the_plugin_settings_back_after_gameinfo(tmp_path):
     settings = make_settings(tmp_path)
-    (settings.plugin_dir / "server.dll").write_bytes(b"placeholder")
+    (settings.plugin_dir / "server.dll").write_bytes(DLL)
     binary = plugin.select_plugin_binary(settings.plugin_dir, "win32", None)
     path = plugin.plugin_settings_path(settings)
     path.parent.mkdir()
@@ -343,7 +416,7 @@ def test_plugin_session_puts_the_plugin_settings_back_after_gameinfo(tmp_path):
 
 def test_linux_layout_installs_the_vulkan_layer_and_its_environment(tmp_path):
     settings = make_settings(tmp_path, platform="linux")
-    (settings.plugin_dir / "libserver.so").write_bytes(b"placeholder")
+    (settings.plugin_dir / "libserver.so").write_bytes(SO)
     (settings.plugin_dir / "libcsdm_vulkan_layer.so").write_bytes(b"layer placeholder")
     binary = plugin.select_plugin_binary(settings.plugin_dir, "linux", 14197)
 

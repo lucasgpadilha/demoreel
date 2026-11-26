@@ -1,18 +1,21 @@
 """``ingame`` renderer: records first-person footage with the real CS2 client.
 
-Pipeline (the recording backend is CS2's own ``startmovie``, driven the way CS Demo Manager does it, see
-``docs/ingame-recording.md``):
+Pipeline (driven the way CS Demo Manager does it, see ``docs/ingame-recording.md``), with one of two recording
+backends: ``startmovie`` (the game's own recorder, image files then encoded; Windows and Linux) or ``hlae`` (HLAE
+pipes the frames straight into ffmpeg; Windows only):
 
 1. read the players' spectator slots from the demo, plan the takes and write ``<demo>.json`` (``actions.py``);
 2. install the user-provided CSDM plugin and patch ``gameinfo.gi`` for the session (``plugin.py``);
-3. start CS2 with ``-insecure +playdemo`` and wait for it to quit, with a watchdog (``launcher.py``);
-4. encode the TGA frames + WAV of each take, join them, delete the raw files (``encode.py``).
+3. start CS2 with ``-insecure +playdemo`` (through HLAE for ``hlae``) and wait for it to quit, with a watchdog
+   (``launcher.py``);
+4. encode the frames + WAV of each take (or mux HLAE's videos), join them, delete the raw files (``encode.py``).
 
 Per-job knobs in ``RenderOptions.extra`` (all optional): ``ingame_hud`` ("deathnotices" | "full"),
 ``ingame_xray`` ("auto" | bool, see ``xray.py``), ``ingame_assists``, ``ingame_player_voices``, ``ingame_true_view`` (bools),
 ``ingame_commands`` (list of console commands run before each take), ``ingame_launch_args`` (list),
 ``ingame_keep_raw``, ``ingame_swap_red_blue`` (bools), ``ingame_lock_wait_s``, ``ingame_startup_timeout_s``,
-``ingame_stall_timeout_s`` (seconds) and ``ingame_backend`` (only "startmovie" exists).
+``ingame_stall_timeout_s`` (seconds), ``ingame_frames`` ("jpg" | "tga"), ``ingame_backend`` ("auto" |
+"startmovie" | "hlae") and ``ingame_hlae_encoder`` ("x264" | "nvenc").
 """
 
 from __future__ import annotations

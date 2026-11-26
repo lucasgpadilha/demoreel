@@ -34,8 +34,11 @@ def ffmpeg_path() -> str:
 
 
 def run(args: list[str], what: str = "ffmpeg") -> None:
+    # ffmpeg writes UTF-8 (file names, metadata); decoding it with the Windows code page could raise
+    # UnicodeDecodeError and hide the real error.
     proc = subprocess.run([ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-y", *args],
-                          capture_output=True, text=True, creationflags=_NO_WINDOW)
+                          capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          creationflags=_NO_WINDOW)
     if proc.returncode != 0:
         raise RenderError(f"{what} failed: {proc.stderr.strip()[-800:]}")
 

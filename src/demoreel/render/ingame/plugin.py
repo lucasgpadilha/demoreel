@@ -87,18 +87,40 @@ def bundled_vulkan_layer_name(version: str | None) -> str:
     return VULKAN_LAYER_LIBRARY_NAME
 
 
+_PATCH_LINE = re.compile(r"(?mi)^\s*PatchVersion\s*=\s*([0-9.]+)\s*$")
+
+
 def parse_patch_version(steam_inf_text: str) -> int | None:
     """``PatchVersion=1.41.9.7`` -> ``14197`` (the numbering used by CSDM's frozen plugin builds)."""
-    match = re.search(r"(?mi)^\s*PatchVersion\s*=\s*([0-9.]+)\s*$", steam_inf_text)
+    match = _PATCH_LINE.search(steam_inf_text)
     if not match:
         return None
     digits = match.group(1).replace(".", "")
     return int(digits) if digits.isdigit() else None
 
 
+def patch_key(number: int) -> tuple[int, ...]:
+    """Order of two patch numbers in CSDM's numbering. The digits are only joined (1.41.9.7 -> 14197), so as
+    plain numbers 1.41.10.2 (141102) would come after 1.42.0.1 (14201). The major version is one digit and the
+    minor two in every CS2 build so far: compared on those first, then on the rest."""
+    text = str(int(number))
+    if len(text) < 4:
+        return (int(text),)
+    return int(text[0]), int(text[1:3]), int(text[3:])
+
+
 def read_cs2_patch_version(settings: IngameSettings) -> int | None:
     try:
         return parse_patch_version(settings.steam_inf_path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001 - informational
+        return None
+
+
+def read_cs2_patch_text(settings: IngameSettings) -> str | None:
+    """The installed CS2 patch as ``steam.inf`` writes it (``1.42.0.1``), for messages."""
+    try:
+        match = _PATCH_LINE.search(settings.steam_inf_path.read_text(encoding="utf-8", errors="replace"))
+        return match.group(1) if match else None
     except Exception:  # noqa: BLE001 - informational
         return None
 
@@ -110,28 +132,74 @@ class PluginBinary:
     vulkan_layer: Path | None = None  # Linux only, the layer built with this binary
 
 
-def list_plugin_binaries(plugin_dir: Path, platform: str) -> dict[str, Path]:
-    """``{"latest": .../server.dll, "14168": .../server_14168.dll, ...}`` for the files that exist."""
+# A library starts with these bytes (PE on Windows, ELF on Linux); the real plugin is far larger than this.
+LIBRARY_MAGIC = {"win32": b"MZ", "linux": b"\x7fELF"}
+MIN_LIBRARY_BYTES = 16 * 1024
+
+
+def library_problem(path: Path, platform: str) -> str | None:
+    """Why ``path`` cannot be the plugin library, or ``None`` when it looks like one. Catches the usual
+    mistake: the GitHub *page* of the file saved under the file's name (an HTML document, not a library)."""
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(64)
+        size = path.stat().st_size
+    except OSError as exc:
+        return f"cannot be read ({exc})"
+    magic = LIBRARY_MAGIC["win32" if platform == "win32" else "linux"]
+    if not head.startswith(magic):
+        kind = "Windows DLL" if platform == "win32" else "Linux library"
+        start = head[:15].decode("ascii", "replace").strip()
+        page = (" (a web page: it was saved from the GitHub page of the file instead of downloaded with its "
+                "'Download raw file' button)") if b"<" in head[:16] else ""
+        return f"is not a {kind}: it starts with {start!r}{page}"
+    if size < MIN_LIBRARY_BYTES:
+        return f"is only {size} bytes long: the download did not finish"
+    return None
+
+
+def _plugin_files(plugin_dir: Path, platform: str) -> dict[str, Path]:
+    """Every file named like a plugin build, valid or not."""
     found: dict[str, Path] = {}
     try:
         latest = plugin_dir / installed_binary_name(platform)
-        if latest.is_file() and latest.stat().st_size > 0:
+        if latest.is_file():
             found[LATEST] = latest
         pattern = re.compile(r"^server_(\d+)\.dll$" if platform == "win32" else r"^libserver_(\d+)\.so$",
                              re.IGNORECASE)
         for entry in plugin_dir.iterdir():
             match = pattern.match(entry.name)
-            if match and entry.is_file() and entry.stat().st_size > 0:
+            if match and entry.is_file():
                 found[match.group(1)] = entry
     except OSError:
         pass
     return found
 
 
+def list_plugin_binaries(plugin_dir: Path, platform: str) -> dict[str, Path]:
+    """``{"latest": .../server.dll, "14168": .../server_14168.dll, ...}`` for the files that are libraries."""
+    return {version: path for version, path in _plugin_files(plugin_dir, platform).items()
+            if library_problem(path, platform) is None}
+
+
+def invalid_plugin_files(plugin_dir: Path, platform: str) -> list[str]:
+    """``"<path> is not a Windows DLL: ..."`` for each file named like a plugin build that is not one."""
+    out = []
+    for path in _plugin_files(plugin_dir, platform).values():
+        try:
+            empty = path.stat().st_size == 0  # an empty file is simply ignored
+        except OSError:
+            empty = False
+        problem = library_problem(path, platform)
+        if problem is not None and not empty:
+            out.append(f"`{path}` {problem}")
+    return out
+
+
 def recommended_version(cs2_patch: int | None, frozen: tuple[int, ...] | list[int] = KNOWN_FROZEN_VERSIONS) -> str:
     """Frozen build with the smallest number >= the installed patch, else ``"latest"``."""
     if cs2_patch is not None:
-        candidates = sorted(v for v in frozen if v >= cs2_patch)
+        candidates = sorted((v for v in frozen if patch_key(v) >= patch_key(cs2_patch)), key=patch_key)
         if candidates:
             return str(candidates[0])
     return LATEST
@@ -167,6 +235,9 @@ def missing_plugin_instruction(settings: IngameSettings, cs2_patch: int | None) 
         f"`{bundled_binary_name(None, platform)}` is the latest build, `{bundled_binary_name('<N>', platform)}` "
         f"are frozen builds for CS2 patches up to N."
     )
+    invalid = invalid_plugin_files(settings.plugin_dir, platform)
+    if invalid:
+        text += " Not usable: " + "; ".join(invalid) + "."
     if platform != "win32":
         text += (f" On Linux also copy `{CSDM_STATIC_DIR}/{bundled_vulkan_layer_name(version)}` next to it when "
                  f"it exists (correct colors in the recorded frames).")
@@ -237,26 +308,42 @@ def _write_bytes(path: Path, data: bytes, attempts: int = 5) -> None:
     raise last_error if last_error is not None else OSError(f"cannot write {path}")
 
 
-def recover_gameinfo(gameinfo: Path) -> str:
-    """Undo a patch left behind by a crashed run. Returns ``"none"``, ``"restored"`` or ``"discarded"``.
+def _whole(data: bytes | None) -> bool:
+    """Does this look like a complete ``gameinfo.gi``? An interrupted write leaves an empty or cut-short file,
+    which must never be taken for a clean one (CS2 then only starts after Steam verified the game files)."""
+    return bool(data and data.strip()) and SEARCH_PATH_ANCHOR.encode("ascii") in (data or b"")
 
-    * backup present and ``gameinfo.gi`` still patched (or gone) -> the backup is put back;
+
+def recover_gameinfo(gameinfo: Path) -> str:
+    """Undo a patch left behind by a crashed run. Returns ``"none"``, ``"restored"``, ``"discarded"`` or
+    ``"damaged"``.
+
+    * backup present and ``gameinfo.gi`` still patched -> the backup is put back when it is the same file minus
+      our line; when it is not, the file was rewritten after the backup was made (a CS2 update, then CS Demo
+      Manager adding its line again) and only the line is taken out, so the update is kept;
+    * backup present and ``gameinfo.gi`` missing, empty or cut short -> the backup is put back;
     * backup present but ``gameinfo.gi`` is clean (the plugin restored it, or Steam rewrote it during an update)
-      -> the current file is kept, since it may be newer than the backup, and the stale backup is deleted.
+      -> the current file is kept, since it may be newer than the backup, and the stale backup is deleted;
+    * neither is usable -> ``"damaged"``: both are left as they are (verify the game files in Steam).
     """
     backup = backup_path(gameinfo)
     if not backup.is_file():
         return "none"
     current = gameinfo.read_bytes() if gameinfo.is_file() else None
     marker = SEARCH_PATH_MARKER.encode("ascii")
-    if current is not None and marker not in current:
+    if _whole(current) and marker not in current:  # type: ignore[operator]
         backup.unlink(missing_ok=True)
         return "discarded"
     saved = backup.read_bytes()
-    if saved and marker not in saved:
-        _write_bytes(gameinfo, saved)
-    elif current is not None:  # unusable backup: remove our line from the current file instead
+    saved_ok = _whole(saved) and marker not in saved
+    if current is not None and marker in current:
+        # The file minus our line is byte for byte the backup when nothing else touched it, and the newer file
+        # when something did: writing the backup over it would undo a CS2 update.
         _write_bytes(gameinfo, _encode(unpatch_gameinfo_text(_decode(current))))
+    elif saved_ok:
+        _write_bytes(gameinfo, saved)
+    else:
+        return "damaged"
     backup.unlink(missing_ok=True)
     return "restored"
 
@@ -265,7 +352,7 @@ def _restore_gameinfo(gameinfo: Path, original: bytes) -> None:
     backup = backup_path(gameinfo)
     try:
         current = gameinfo.read_bytes() if gameinfo.is_file() else None
-        if current is None or SEARCH_PATH_MARKER.encode("ascii") in current:
+        if not _whole(current) or SEARCH_PATH_MARKER.encode("ascii") in current:  # type: ignore[operator]
             _write_bytes(gameinfo, original)
         # else: already clean (restored by the plugin or replaced by Steam) - keep that version.
         backup.unlink(missing_ok=True)

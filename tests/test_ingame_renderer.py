@@ -54,7 +54,10 @@ def env(tmp_path, monkeypatch):
 
 
 def add_plugin(settings: IngameSettings) -> None:
-    (settings.plugin_dir / plugin.installed_binary_name(settings.platform)).write_bytes(b"placeholder library")
+    """Not a real library: only the header one starts with, and the size of a real one."""
+    magic = plugin.LIBRARY_MAGIC["win32" if settings.platform == "win32" else "linux"]
+    (settings.plugin_dir / plugin.installed_binary_name(settings.platform)).write_bytes(
+        magic + b"\0" * plugin.MIN_LIBRARY_BYTES)
 
 
 def make_job(demo: Path, tmp_path: Path, clips: list[Clip], **kwargs) -> RenderJob:
