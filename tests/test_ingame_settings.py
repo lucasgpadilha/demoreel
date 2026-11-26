@@ -136,3 +136,57 @@ def test_paths_inside_the_game_per_platform(tmp_path):
     assert win.bin_dir.name == "win64" and lin.bin_dir.name == "linuxsteamrt64"
     assert win.gameinfo_path == tmp_path / "game" / "csgo" / "gameinfo.gi"
     assert win.plugin_install_dir == tmp_path / "game" / "csgo" / "csdm"
+
+
+def make_hlae(root: Path, version: str, *, hook: bool = True) -> Path:
+    exe = root / version / "HLAE.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"MZ")
+    if hook:
+        (exe.parent / "x64").mkdir()
+        (exe.parent / "x64" / "AfxHookSource2.dll").write_bytes(b"MZ")
+    return exe
+
+
+def test_hlae_is_chosen_by_version_number_and_only_where_it_can_hook_cs2(tmp_path):
+    root = tmp_path / "data" / "cache" / "hlae"
+    make_hlae(root, "2.193.2")
+    make_hlae(root, "2.193.9")
+    newest = make_hlae(root, "2.193.10")  # sorted as text it would lose to 2.193.9
+    make_hlae(root, "backup")  # a name that is not a version never wins
+    make_hlae(root, "2.194.0", hook=False)  # a partial extraction cannot record CS2
+
+    s = ingame_settings.load({}, data_dir=tmp_path / "data", platform="win32")
+    assert s.hlae_exe == newest.absolute() and s.hlae_available and s.hlae_version == "2.193.10"
+    found = ingame_settings.hlae_installs(s.hlae_root)
+    assert [h.version for h in found] == ["2.193.10", "2.193.9", "2.193.2", "backup", "2.194.0"]
+    assert [h.usable for h in found] == [True, True, True, True, False]
+
+    assert ingame_settings.version_key("2.193.10") > ingame_settings.version_key("2.193.9")
+    assert ingame_settings.version_key("latest") < ingame_settings.version_key("0.1")
+
+
+def test_hlae_without_its_hook_is_not_available_so_auto_records_with_the_game(tmp_path):
+    root = tmp_path / "data" / "cache" / "hlae"
+    make_hlae(root, "2.190.0", hook=False)
+    s = ingame_settings.load({}, data_dir=tmp_path / "data", platform="win32")
+    assert s.hlae_exe is None and not s.hlae_available
+
+    given = make_hlae(tmp_path / "elsewhere", "hlae-nightly", hook=False)
+    s = ingame_settings.load({"DEMOREEL_INGAME_HLAE_EXE": str(given)}, data_dir=tmp_path / "data",
+                             platform="win32")
+    assert s.hlae_exe == given and not s.hlae_available  # named on purpose, but it still cannot record CS2
+    assert s.hlae_version is None  # "hlae-nightly" has no version number
+
+
+def test_doctor_line_says_which_hlae_is_used_and_what_else_is_there():
+    from demoreel.cli import _hlae_line
+
+    details = {"hlae": "C:/hlae/2.193.10/HLAE.exe", "hlae_version": "2.193.10",
+               "hlae_installs": [{"version": "2.193.10", "path": "C:/hlae/2.193.10/HLAE.exe", "usable": True},
+                                 {"version": "2.193.9", "path": "C:/hlae/2.193.9/HLAE.exe", "usable": True},
+                                 {"version": "old", "path": "C:/hlae/old/HLAE.exe", "usable": False}]}
+    line = _hlae_line(details)
+    assert line.startswith("2.193.10 at C:/hlae/2.193.10/HLAE.exe")
+    assert "also found: 2.193.9, old (no x64/AfxHookSource2.dll" in line
+    assert "not installed" in _hlae_line({"hlae": None, "hlae_installs": []})

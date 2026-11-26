@@ -304,6 +304,23 @@ def doctor() -> None:
     for r in describe_renderers():
         mark = "OK " if r["available"] else "NO "
         typer.echo(f"renderer      {mark}{r['name']:7} {r['reason'] or json.dumps(r['details'], default=str)}")
+        if r["name"] == "ingame":
+            typer.echo(f"hlae          {_hlae_line(r['details'])}")
+
+
+def _hlae_line(details: dict) -> str:
+    """Which HLAE the in-game renderer uses and which others are installed (newest first)."""
+    installs = details.get("hlae_installs") or []
+    chosen = details.get("hlae")
+    others = [f"{h['version']}" + ("" if h["usable"] else " (no x64/AfxHookSource2.dll: cannot record CS2)")
+              for h in installs if h["path"] != chosen]
+    if chosen:
+        line = f"{details.get('hlae_version') or 'version unknown'} at {chosen}"
+    elif installs:
+        line = "none usable"
+    else:
+        line = "not installed (optional: the game's own recorder is used)"
+    return line + (f"; also found: {', '.join(others)}" if others else "")
 
 
 if __name__ == "__main__":

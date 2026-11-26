@@ -32,7 +32,45 @@ ENV_TIMEOUT_S = "DEMOREEL_INGAME_TIMEOUT_S"
 ENV_RUNTIME_SCRIPT = "DEMOREEL_INGAME_RUNTIME_SCRIPT"
 ENV_BACKEND = "DEMOREEL_INGAME_BACKEND"  # auto (default: hlae where it is installed, else startmovie) | startmovie | hlae
 ENV_HLAE_ENCODER = "DEMOREEL_INGAME_HLAE_ENCODER"  # x264 (default) | nvenc
-ENV_HLAE_EXE = "DEMOREEL_INGAME_HLAE_EXE"  # HLAE.exe; default: newest <data_dir>/cache/hlae/*/HLAE.exe
+ENV_HLAE_EXE = "DEMOREEL_INGAME_HLAE_EXE"  # HLAE.exe; default: highest version in <data_dir>/cache/hlae/*/
+
+# HLAE's hook for CS2; a folder without it cannot record CS2 (an old release, or a partial extraction).
+HLAE_HOOK_DLL = ("x64", "AfxHookSource2.dll")
+
+
+def version_key(name: str) -> tuple[int, tuple[int, ...]]:
+    """Sort key of a folder named after a version: ``2.193.10`` after ``2.193.9``; a name without any number
+    (``latest``, ``backup``) before every version."""
+    numbers = tuple(int(x) for x in re.findall(r"\d+", name))
+    return (1, numbers) if numbers else (0, ())
+
+
+@dataclass(frozen=True)
+class HlaeInstall:
+    exe: Path  # .../HLAE.exe
+    usable: bool  # x64/AfxHookSource2.dll is next to it
+
+    @property
+    def version(self) -> str:
+        """The folder name (``2.193.2``), which is how releases are extracted under ``cache/hlae``."""
+        return self.exe.parent.name
+
+    @property
+    def hook_dll(self) -> Path:
+        return self.exe.parent.joinpath(*HLAE_HOOK_DLL)
+
+
+def hlae_installs(root: Path) -> list[HlaeInstall]:
+    """Every ``<root>/<version>/HLAE.exe``, best first: usable ones (with the CS2 hook) by version number, then
+    the rest. Never raises."""
+    found: list[HlaeInstall] = []
+    try:
+        for exe in Path(root).glob("*/HLAE.exe"):
+            if exe.is_file():
+                found.append(HlaeInstall(exe=exe, usable=exe.parent.joinpath(*HLAE_HOOK_DLL).is_file()))
+    except OSError:
+        return []
+    return sorted(found, key=lambda h: (h.usable, version_key(h.version)), reverse=True)
 
 
 @dataclass(frozen=True)
@@ -52,7 +90,25 @@ class IngameSettings:
 
     @property
     def hlae_available(self) -> bool:
-        return self.platform == "win32" and self.hlae_exe is not None and self.hlae_exe.is_file()
+        """HLAE.exe is there *with* the CS2 hook: without it ``auto`` would pick a backend that cannot work."""
+        try:
+            return (self.platform == "win32" and self.hlae_exe is not None and self.hlae_exe.is_file()
+                    and self.hlae_exe.parent.joinpath(*HLAE_HOOK_DLL).is_file())
+        except OSError:
+            return False
+
+    @property
+    def hlae_version(self) -> str | None:
+        """The HLAE release in use, from its folder name (``.../hlae/2.193.2/HLAE.exe``), when it reads as one."""
+        if self.hlae_exe is None:
+            return None
+        name = self.hlae_exe.parent.name
+        return name if re.search(r"\d", name) else None
+
+    @property
+    def hlae_root(self) -> Path:
+        """Where HLAE releases are looked for: ``<data_dir>/cache/hlae``."""
+        return self.data_dir.parent / "cache" / "hlae"
 
     @property
     def is_windows(self) -> bool:
@@ -319,11 +375,8 @@ def load(env: Mapping[str, str] | None = None, data_dir: Path | None = None,
 
     hlae_exe = _env_path(environ, ENV_HLAE_EXE)
     if hlae_exe is None:
-        try:
-            found = sorted((root / "cache" / "hlae").glob("*/HLAE.exe"))
-            hlae_exe = found[-1] if found else None
-        except OSError:
-            hlae_exe = None
+        usable = [h for h in hlae_installs(root / "cache" / "hlae") if h.usable]
+        hlae_exe = usable[0].exe if usable else None
 
     return IngameSettings(
         backend=(environ.get(ENV_BACKEND) or "auto").strip().lower() or "auto",

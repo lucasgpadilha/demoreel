@@ -63,7 +63,7 @@ or a number such as `14168`) to force one.
 | `DEMOREEL_INGAME_TIMEOUT_S` | hard limit for one game session, in seconds | `240 + 90 x takes + 12 x clip seconds` |
 | `DEMOREEL_INGAME_RUNTIME_SCRIPT` | Linux: path of `SteamLinuxRuntime_sniper/_v2-entry-point` | searched in the Steam libraries |
 | `DEMOREEL_INGAME_BACKEND` | recording system: `auto`, `startmovie`, `hlae` (see [Recording backends](#recording-backends)) | `auto` |
-| `DEMOREEL_INGAME_HLAE_EXE` | path of `HLAE.exe` | newest `<data_dir>/cache/hlae/*/HLAE.exe` |
+| `DEMOREEL_INGAME_HLAE_EXE` | path of `HLAE.exe` | the highest version under `<data_dir>/cache/hlae/` that has `x64/AfxHookSource2.dll` |
 | `DEMOREEL_INGAME_HLAE_ENCODER` | encoder HLAE pipes frames into: `x264` or `nvenc` (NVIDIA cards) | `x264` |
 | `DEMOREEL_INGAME_CAPTURE_FPS` | minimum recording frame rate; recording time grows with it | `30` |
 
@@ -326,7 +326,10 @@ Planning, player slots, the plugin session, the lock, the watchdog, x-ray and ma
 
 **Installing HLAE**: download the release zip from https://github.com/advancedfx/advancedfx/releases and
 extract it to `<data_dir>/cache/hlae/<version>/` (so that `HLAE.exe` and `x64/AfxHookSource2.dll` are there),
-or point `DEMOREEL_INGAME_HLAE_EXE` at an existing install. demoreel writes `ffmpeg/ffmpeg.ini` next to
+or point `DEMOREEL_INGAME_HLAE_EXE` at an existing install. Several releases can sit side by side: the folder
+with the highest version number wins (`2.193.10` over `2.193.9`; a folder named `backup` or `latest` only when
+nothing else is there), and a folder without `x64/AfxHookSource2.dll` is never used. `demoreel doctor` prints
+the one chosen and the others found. demoreel writes `ffmpeg/ffmpeg.ini` next to
 `HLAE.exe` so HLAE finds the bundled ffmpeg. HLAE injects a DLL into the game; this is done with `-insecure`
 (VAC is off for the session), exactly as CS Demo Manager does it.
 

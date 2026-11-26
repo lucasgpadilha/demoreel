@@ -29,7 +29,7 @@ from pathlib import Path
 
 from ..base import RecorderBusy, RenderCancelled, RenderError
 from . import procs
-from .settings import IngameSettings
+from .settings import HLAE_HOOK_DLL, IngameSettings
 
 INSECURE_FLAG = "-insecure"  # the plugin refuses to load without it; it also keeps VAC out of the session
 
@@ -67,9 +67,6 @@ def build_command(settings: IngameSettings, game_args: Sequence[str]) -> list[st
                               "or set DEMOREEL_INGAME_RUNTIME_SCRIPT.")
         return [str(settings.runtime_script), "--verb=waitforexitandrun", "--", str(executable), *game_args]
     raise RenderError(f"The in-game renderer does not support the platform {settings.platform!r}.")
-
-
-HLAE_HOOK_DLL = ("x64", "AfxHookSource2.dll")
 
 
 def build_hlae_command(settings: IngameSettings, game_args: Sequence[str]) -> list[str]:

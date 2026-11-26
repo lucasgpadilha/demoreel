@@ -30,7 +30,7 @@ from typing import Any
 from .. import ffmpeg
 from ..base import Availability, RenderCancelled, RenderError, RenderJob, RenderResult, player_view
 from . import actions, encode, launcher, plugin, procs, slots, staging, xray
-from .settings import IngameSettings, default_lock_path
+from .settings import IngameSettings, default_lock_path, hlae_installs
 from .settings import load as load_settings
 
 # "startmovie": the game's own recorder (image files, then encoded) - works on Windows and Linux.
@@ -155,6 +155,9 @@ class IngameRenderer:
         problems: list[str] = []
         details.update({"platform": settings.platform, "backend": self._backend(settings, {}),
                         "hlae": str(settings.hlae_exe) if settings.hlae_available else None,
+                        "hlae_version": settings.hlae_version if settings.hlae_available else None,
+                        "hlae_installs": [{"version": h.version, "path": str(h.exe), "usable": h.usable}
+                                          for h in hlae_installs(settings.hlae_root)],
                         "plugin_dir": str(settings.plugin_dir)})
         if not (settings.is_windows or settings.is_linux):
             return [f"The in-game renderer needs Windows or Linux (CS2 does not run on {settings.platform})."]
