@@ -708,13 +708,18 @@ class _ApiKeyGate:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
-            headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+            import hmac
+
+            # latin-1, as HTTP headers are: any byte decodes, so a strange header is a 401, not a crash
+            headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
             auth = headers.get("authorization", "")
             given = auth[7:] if auth.lower().startswith("bearer ") else headers.get("x-api-key", "")
-            if given != self.key:
+            if not hmac.compare_digest(given.encode("latin-1"), self.key.encode("utf-8")):
                 await send({"type": "http.response.start", "status": 401,
                             "headers": [(b"content-type", b"application/json"), (b"www-authenticate", b"Bearer")]})
-                await send({"type": "http.response.body", "body": b'{"error":"invalid or missing API key"}'})
+                await send({"type": "http.response.body", "body": (
+                    b'{"error":"invalid or missing API key: /mcp needs the organiser\'s key (the API key when '
+                    b'no organiser key is set), sent as Authorization: Bearer <key> or X-API-Key"}')})
                 return
         await self.app(scope, receive, send)
 

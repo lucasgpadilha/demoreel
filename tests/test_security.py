@@ -281,6 +281,21 @@ def test_a_zip_without_a_demo_is_refused_and_removed(client):
     assert r.status_code == 400 and "no .dem" in r.json()["detail"]
 
 
+# ------------------------------------------------------------------------------------------- /mcp key
+
+def test_the_mcp_key_is_checked_without_crashing_on_odd_headers(admin_key):
+    from demoreel.api import create_app
+
+    with TestClient(create_app()) as c:  # the gate is set up when the app is built
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        r = c.post("/mcp/", json=body)
+        assert r.status_code == 401 and "organiser" in r.json()["error"]
+        r = c.post("/mcp/", json=body, headers={"Authorization": b"Bearer \xff\xfe-not-utf8"})
+        assert r.status_code == 401  # not a 500
+        r = c.post("/mcp/", json=body, headers={**admin_key, "Accept": "application/json, text/event-stream"})
+        assert r.status_code == 200 and "tools" in r.json()["result"]
+
+
 # ------------------------------------------------------------------------------------------- docker
 
 def test_docker_compose_publishes_the_port_on_this_machine_only():
