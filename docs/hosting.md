@@ -76,7 +76,10 @@ Without any key (the default of `demoreel serve` on 127.0.0.1) everyone who reac
 organiser. That is fine on your own machine and nowhere else. `DEMOREEL_ADMIN_KEY` makes it a public viewer:
 anyone reads, only the organiser's key changes things. `DEMOREEL_API_KEY` closes reading too. Keys need 16
 characters or more. `docker compose up` publishes the port on 127.0.0.1 only; its comments say how to open it
-on purpose.
+on purpose. `demoreel serve` itself refuses to listen beyond this machine (`--host 0.0.0.0` or a LAN address)
+while neither key is set; `--i-know-it-is-open` or the environment variable `DEMOREEL_ALLOW_OPEN=1` (read from
+the process environment, not from `.env`) starts it anyway, which the Docker image does because its port is
+only published on 127.0.0.1.
 
 What the server refuses, so that a web page open in someone's browser cannot use it:
 
