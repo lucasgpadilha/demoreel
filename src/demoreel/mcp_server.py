@@ -118,6 +118,9 @@ Since = Annotated[str | None, Field(description="Only matches played at or after
 Until = Annotated[str | None, Field(description="Only matches played before this ISO 8601 moment.")]
 Exclude = Annotated[list[str] | None, Field(description="Match ids to leave out, whatever the other filters "
                                                        "say (e.g. matches hidden on the community's site).")]
+Format = Annotated[Literal["16:9", "9:16", "1:1"] | None, Field(description=(
+    "Shape of the video: '16:9' (default), '9:16' (1080x1920, laid out for phones and ready to post) or '1:1'. "
+    "Ignored when width and height are both given."))]
 
 
 def build_server() -> MCPServer:
@@ -328,8 +331,9 @@ def build_server() -> MCPServer:
         return {"deleted": highlight_id}
 
     # ------------------------------------------------------------------ renders & jobs
-    def _render_opts(width: int | None, height: int | None, fps: int | None, extra: dict[str, Any] | None) -> RenderOptionsIn:
-        return RenderOptionsIn(width=width, height=height, fps=fps, extra=extra or {})
+    def _render_opts(width: int | None, height: int | None, fps: int | None, extra: dict[str, Any] | None,
+                     fmt: str | None = None) -> RenderOptionsIn:
+        return RenderOptionsIn(format=fmt, width=width, height=height, fps=fps, extra=extra or {})
 
     @mcp.tool(annotations=WRITE, description=(
         "Render a highlight to an mp4 (asynchronous). renderer: 'auto' (in-game POV if this server can, else "
@@ -338,11 +342,12 @@ def build_server() -> MCPServer:
     @_threaded
     def render_highlight(highlight_id: str, renderer: str | None = None, width: int | None = None,
                          height: int | None = None, fps: int | None = None, extra: dict[str, Any] | None = None,
-                         wait_seconds: Annotated[float, Field(ge=0, le=120)] = 0) -> dict[str, Any]:
+                         wait_seconds: Annotated[float, Field(ge=0, le=120)] = 0,
+                         format: Format = None) -> dict[str, Any]:
         with session_scope() as s:
             h = service.get_highlight(s, highlight_id)
             r, j = service.create_render(s, h.match_id, [h.id], renderer=renderer,
-                                         options=_render_opts(width, height, fps, extra))
+                                         options=_render_opts(width, height, fps, extra, format))
             render_id, job_id, name = r.id, j.id, r.renderer
         return _job_result(job_id, wait_seconds, {"render_id": render_id, "renderer": name})
 
@@ -354,12 +359,14 @@ def build_server() -> MCPServer:
                     top: Annotated[int, Field(ge=1, le=30)] = 5, player: str | None = None, title: str | None = None,
                     renderer: str | None = None, width: int | None = None, height: int | None = None,
                     fps: int | None = None, extra: dict[str, Any] | None = None,
-                    wait_seconds: Annotated[float, Field(ge=0, le=120)] = 0) -> dict[str, Any]:
+                    wait_seconds: Annotated[float, Field(ge=0, le=120)] = 0,
+                    format: Format = None) -> dict[str, Any]:
         sid = _resolve_player(_analysis(match_id), player) if player else None
         with session_scope() as s:
             ids = highlight_ids or service.pick_top_highlights(s, match_id, top, sid)
             r, j = service.create_render(s, match_id, ids, renderer=renderer, kind="reel",
-                                         title=title or "Match highlights", options=_render_opts(width, height, fps, extra))
+                                         title=title or "Match highlights",
+                                         options=_render_opts(width, height, fps, extra, format))
             render_id, job_id, name = r.id, j.id, r.renderer
         return _job_result(job_id, wait_seconds, {"render_id": render_id, "renderer": name, "highlight_ids": ids})
 

@@ -95,7 +95,8 @@ are kept and flagged `stale`; render again.
 ```
 
 **Render.** `render_highlight(highlight_id, renderer="auto", wait_seconds=90)`; `renderer` is `auto`
-(first-person when this server can, else 2D), `ingame` or `radar`. Several clips in one video:
+(first-person when this server can, else 2D), `ingame` or `radar`. `format="9:16"` makes a vertical video laid
+out for phones (`"1:1"` square; default `"16:9"`), on `render_reel` too. Several clips in one video:
 `render_reel(match_id, highlight_ids=[...])` or `render_reel(match_id, top=5, player=...)`. Every video of a
 match in 16:9 and 9:16 in one call: `produce_match(match_id)`. All return a `job_id`.
 

@@ -107,6 +107,18 @@ def test_edit_highlight_takes_every_operation_including_the_camera(call, match_i
     assert call("get_highlight", highlight_id=hid)["version"] == back["version"]  # failed edits change nothing
 
 
+def test_render_tools_pass_the_shape_on(call, match_id):
+    hid = call("list_highlights", match_id=match_id)[0]["id"]
+    one = call("render_highlight", highlight_id=hid, renderer="radar", format="9:16")
+    assert call("get_render", render_id=one["render_id"])["format"] == "9:16"
+    reel = call("render_reel", match_id=match_id, top=2, renderer="radar", format="1:1")
+    assert call("get_render", render_id=reel["render_id"])["format"] == "1:1"
+    plain = call("render_highlight", highlight_id=hid, renderer="radar")
+    assert call("get_render", render_id=plain["render_id"])["format"] == "16:9"
+    with pytest.raises(ToolError, match="16:9"):
+        call("render_highlight", highlight_id=hid, renderer="radar", format="4:3")
+
+
 # ------------------------------------------------------------------------------------------- /mcp and its key
 
 INIT = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
