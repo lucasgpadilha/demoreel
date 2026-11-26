@@ -334,6 +334,19 @@ chat, had the plugin's voice indicator in the picture for half of the clip altho
 off; the same recording with `csdm_voice_indicator 0` passed through `ingame_commands` (then a per-render option) did not. That is the
 command, on the tick, that every take now runs by itself.
 
+A **fixed camera** was recorded on 2026-11-25 (Windows, CS2 patch 1.42.0.1, HLAE 2.193.2 with AfxHookSource2
+0.42.2): one clip of three takes - a fixed camera from `spec_pos`, then two players' points of view over the
+same 8.4 s - recorded in one game launch with no warnings, 983 frames (the three takes with their handles), and
+the fixed-camera take showed the view the user had set with `spec_pos`. On that same CS2 patch HLAE 2.193.1 did
+not record at all: the game stopped at start with an AfxHookSource2 error box about `addresses.cpp`, until
+2.193.2 was installed. About `cl_demo_freecam`, which a fixed camera sets to 0 and demoreel never sets back: it
+only ever runs as a console command of the take, and every launch - through HLAE too, which is given the same
+environment and starts the game - runs with `USRLOCALCSGO` pointing at `<data_dir>/ingame/cfg`, so whatever the
+game saves of it goes to that private folder, used only for recordings, and not to the player's own config.
+That is what the code does; the player's `cfg` folder was not hashed before and after this run (it was on
+2026-11-14, with the game's own recorder), and that HLAE passes the environment on to the game is inferred from
+the same folder being used, not read in HLAE's source.
+
 The first run also found one defect, now fixed and covered by a test: CS2 writes `ServerConfig.vdf` and
 `_iconcache/` into `game/csgo/csdm` while it is the first search path, which left that folder and
 `game/bin/win64/csdm.log` behind. Both are now removed after a successful recording.
@@ -342,6 +355,15 @@ The first run also found one defect, now fixed and covered by a test: CS2 writes
 
 - Reels (several highlights in one render) and takes that require seeking backwards in the demo.
 - Cancelling in the middle of a recording, and the watchdog timeouts, against the real game.
+- demoreel killed in the middle of a real recording: the Job Object closing `cs2.exe` (started directly or by
+  HLAE) when demoreel dies was checked with a stand-in process only, as was the start-up recovery of the CS2
+  folder (a fake folder); on Linux, whether the game inside the Steam runtime's container dies with its
+  launcher (`PR_SET_PDEATHSIG` reaches the launcher only).
+- The early failures against a real broken install: the error box lookup was checked with a fake window list
+  (the dialog class and its static text are what Windows message boxes use); the 120 s without `csdm.log`
+  assumes the plugin writes it when it loads, well before the demo is shown; HLAE's "every take ended" check
+  assumes the plugin writes `csdm.log` while the game runs (where it does not, a game that does not quit by
+  itself after its last take ends in a stall error instead of a warning).
 - A standalone `demoreel worker -c ingame` on a second machine (only the worker started by `serve` was used).
 - Anything on Linux: launch through the runtime, the Vulkan layer environment, the red/blue swap default, the
   flatpak Steam location.
@@ -421,8 +443,10 @@ makes that the rule. Seen on 2026-11-25: HLAE 2.193.1 on CS2 1.42.0.1 stopped th
 `AfxHookSource2` error box about `addresses.cpp`; HLAE 2.193.2 records with it.
 
 Verified with HLAE 2.193.0: three plays / six takes at 1080p30 (x264 and NVENC) and 1080p60 (NVENC), frame
-counts 1928–1930 of 1930 expected, sound present, kill feed only, automatic x-ray. Not verified: cancellation
-mid-recording, a stalled HLAE session, CS2 builds newer than that HLAE release.
+counts 1928–1930 of 1930 expected, sound present, kill feed only, automatic x-ray. Then with HLAE 2.193.2 on
+CS2 1.42.0.1, a fixed camera and two players in one launch (see [What has been verified](#what-has-been-verified)).
+Not verified: cancellation mid-recording, a stalled HLAE session, the automatic fall-back to the game's own
+recorder against a real broken HLAE.
 
 ## Attribution
 
