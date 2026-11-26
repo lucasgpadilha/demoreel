@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     mcp_allowed_hosts: list[str] = Field(default_factory=list,
                                          description="Extra Host headers accepted by the MCP endpoint (and, "
                                                      "like allowed_hosts, by the rest of the server).")
+    webhooks_allow_private: bool = Field(False, description=(
+        "Let webhooks reach private, loopback and link-local addresses while a key is set. Off by default: on a "
+        "server open to others, a webhook must not become a way into its own network."))
     timezone: str | None = Field(None, description="IANA time zone (e.g. America/Sao_Paulo) used to group "
                                                    "matches into nights. Default: this machine's time zone.")
     publish_target: str | None = Field(None, description="Read-only mirror `demoreel publish` copies to, as "

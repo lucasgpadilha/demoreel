@@ -69,7 +69,7 @@ from .schemas import (
     WorkerOut,
     WorkerProgress,
 )
-from .webhooks import EVENTS
+from .webhooks import EVENTS, blocked_reason
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -584,6 +584,9 @@ def create_webhook(body: WebhookIn) -> WebhookOut:
         raise HTTPException(400, f"Unknown events {bad}. Valid: {EVENTS}")
     if not body.url.lower().startswith(("http://", "https://")):
         raise HTTPException(400, "Webhook url must be http(s).")
+    blocked = blocked_reason(body.url)
+    if blocked:
+        raise HTTPException(400, blocked)
     with session_scope() as s:
         w = Webhook(url=body.url, events=body.events, secret=body.secret)
         s.add(w)

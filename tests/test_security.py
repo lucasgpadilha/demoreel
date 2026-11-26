@@ -589,6 +589,60 @@ def test_without_an_organiser_key_the_local_user_sees_the_webhooks(client):
     assert client.get("/api/v1/webhooks").status_code == 200
 
 
+def test_with_a_key_webhooks_cannot_point_inside_the_network(client, admin_key, monkeypatch):
+    for url in ("http://127.0.0.1:9/hook", "http://localhost/hook", "http://10.0.0.5/hook", "http://[::1]/x",
+                "http://169.254.169.254/latest/meta-data"):
+        r = client.post("/api/v1/webhooks", json={"url": url, "events": []}, headers=admin_key)
+        assert r.status_code == 400 and "private network" in r.json()["detail"], url
+        assert "DEMOREEL_WEBHOOKS_ALLOW_PRIVATE" in r.json()["detail"]
+    monkeypatch.setattr(get_settings(), "webhooks_allow_private", True)
+    r = client.post("/api/v1/webhooks", json={"url": "http://10.0.0.5/hook", "events": []}, headers=admin_key)
+    assert r.status_code == 201
+    client.delete(f"/api/v1/webhooks/{r.json()['id']}", headers=admin_key)
+
+
+def test_webhooks_are_delivered_without_holding_the_caller(monkeypatch):
+    import threading
+    import time
+
+    from demoreel import webhooks
+    from demoreel.db import Webhook, init_db, session_scope
+
+    init_db()
+    with session_scope() as s:
+        w = Webhook(url="http://127.0.0.1:9/slow-hook", events=["render.ready"], secret="s")
+        s.add(w)
+        s.flush()
+        hook_id = w.id
+    delivered = threading.Event()
+
+    def slow_post(url, **kwargs):
+        time.sleep(1.0)
+        delivered.set()
+
+        class Ok:
+            status_code = 200
+        return Ok()
+
+    monkeypatch.setattr(webhooks.httpx, "post", slow_post)
+    try:
+        started = time.monotonic()
+        assert webhooks.emit("render.ready", {"render_id": "r_x"}) == 1
+        assert time.monotonic() - started < 0.5  # the job that finished does not wait for the endpoint
+        assert delivered.wait(10)
+    finally:
+        with session_scope() as s:
+            s.delete(s.get(Webhook, hook_id))
+
+
+def test_a_webhook_turned_private_is_not_sent_while_a_key_is_set(admin_key, monkeypatch):
+    from demoreel import webhooks
+
+    calls = []
+    monkeypatch.setattr(webhooks.httpx, "post", lambda *a, **k: calls.append(a))
+    assert webhooks._deliver("http://127.0.0.1:9/hook", None, "job.failed", b"{}") is False and calls == []
+
+
 # ------------------------------------------------------------------------------------------- long waits
 
 @pytest.fixture
