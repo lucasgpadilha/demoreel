@@ -23,6 +23,8 @@ class Settings(BaseSettings):
         "If set, *changing* anything (POST/PATCH/PUT/DELETE on /api, and all of /mcp) requires this key, while "
         "reading stays open. Use it when the UI is shown to the public, e.g. embedded in a community's site."))
     max_upload_mb: int = 2048
+    max_json_kb: int = Field(1024, description="Largest JSON body a request may carry (a demo upload has its own "
+                                               "limit, max_upload_mb).")
     allowed_hosts: list[str] = Field(default_factory=list, description=(
         "Host names this server answers to besides localhost, `host` and the host of `public_url` (a LAN "
         "address, a second domain…). While no key is set, a request naming any other host is refused: that "

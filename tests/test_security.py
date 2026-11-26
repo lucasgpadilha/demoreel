@@ -137,6 +137,150 @@ def test_listed_sites_and_embedding_parents_are_trusted(client, monkeypatch):
         api._policy_cache.clear()
 
 
+# ------------------------------------------------------------------------------------------- bodies
+
+def _through_gate(method: str, path: str, chunks: list[bytes], headers: dict[str, str] | None = None):
+    """Run one request through the gate in front of a stand-in app that reads its whole body.
+    Returns ``(status, body bytes the app read, detail)``."""
+    import asyncio
+    import json
+
+    from demoreel.api import _RequestGate
+
+    read = []
+
+    async def app(scope, receive, send):
+        while True:
+            message = await receive()
+            read.append(len(message.get("body") or b""))
+            if not message.get("more_body"):
+                break
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    pending = list(chunks)
+
+    async def receive():
+        body = pending.pop(0) if pending else b""
+        return {"type": "http.request", "body": body, "more_body": bool(pending)}
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "method": method, "path": path, "query_string": b"",
+             "headers": [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]}
+    asyncio.run(_RequestGate(app)(scope, receive, send))
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    return status, sum(read), json.loads(body).get("detail") if status != 200 else None
+
+
+def test_a_visitor_is_refused_before_the_body_is_read(admin_key):
+    status, read, detail = _through_gate("POST", "/api/v1/matches", [b"x" * 65536] * 80)  # 5 MB
+    assert status == 403 and read == 0 and "organiser" in detail
+    status, read, _ = _through_gate("POST", "/api/v1/matches", [b"x" * 1024], admin_key)
+    assert status == 200 and read == 1024
+
+
+def test_with_an_api_key_nothing_is_read_without_it(monkeypatch):
+    monkeypatch.setattr(get_settings(), "api_key", "reader-key-0123456789")
+    status, read, detail = _through_gate("PATCH", "/api/v1/highlights/h_x", [b"{}"])
+    assert status == 401 and read == 0 and "API key" in detail
+    assert _through_gate("GET", "/api/v1/matches", [])[0] == 401
+
+
+def test_worker_routes_need_a_token_before_their_body_is_read():
+    status, read, detail = _through_gate("POST", "/api/v1/worker/claim", [b"{}"])
+    assert status == 401 and read == 0 and "worker token" in detail
+
+
+def test_bodies_are_held_to_a_size_declared_or_not(monkeypatch):
+    monkeypatch.setattr(get_settings(), "max_json_kb", 4)
+    big = [b"x" * 1024] * 8
+    status, read, detail = _through_gate("POST", "/api/v1/webhooks", big, {"Content-Length": str(8 * 1024)})
+    assert status == 413 and read == 0 and "4 KB" in detail and "DEMOREEL_MAX_JSON_KB" in detail
+    status, read, detail = _through_gate("POST", "/api/v1/webhooks", big)  # chunked: no length given
+    assert status == 413 and read <= 5 * 1024 and "4 KB" in detail
+    assert _through_gate("POST", "/api/v1/webhooks", [b"x" * 1024] * 3)[0] == 200
+
+
+def test_a_json_body_over_the_limit_gets_413_from_the_api(client, monkeypatch):
+    monkeypatch.setattr(get_settings(), "max_json_kb", 1)
+    r = client.post("/api/v1/webhooks", json={"url": "http://x.example/" + "a" * 4096, "events": []})
+    assert r.status_code == 413 and "DEMOREEL_MAX_JSON_KB" in r.json()["detail"]
+
+
+def test_an_upload_is_counted_while_it_is_stored(client, monkeypatch):
+    import io
+
+    from demoreel import service
+
+    monkeypatch.setattr(get_settings(), "max_upload_mb", 1)
+    tmp = get_settings().data_dir / "tmp"
+    before = set(tmp.glob("*")) if tmp.is_dir() else set()
+    payload = service.CS2_MAGIC + b"\0" * (1024 * 1024 + 512 * 1024)  # 1.5 MB: under the multipart margin
+    r = client.post("/api/v1/matches", files={"file": ("big.dem", io.BytesIO(payload))})
+    assert r.status_code == 413 and "1 MB" in r.json()["detail"] and "DEMOREEL_MAX_UPLOAD_MB" in r.json()["detail"]
+    assert set(tmp.glob("*")) == before  # nothing left behind
+    r = client.post("/api/v1/matches", files={"file": ("bigger.dem", io.BytesIO(payload * 2))})
+    assert r.status_code == 413  # refused by the gate: over the limit plus the margin
+
+
+def test_a_zip_with_too_many_entries_is_refused_before_it_is_listed(client):
+    import io
+    import zipfile
+
+    from demoreel import service
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("match.dem", service.CS2_MAGIC + b"zip-entries")
+        for i in range(service.MAX_ZIP_ENTRIES):
+            zf.writestr(f"junk/{i}.txt", b"")
+    r = client.post("/api/v1/matches", files={"file": ("many.zip", io.BytesIO(buf.getvalue()))})
+    assert r.status_code == 400 and f"at most {service.MAX_ZIP_ENTRIES}" in r.json()["detail"]
+
+    small = io.BytesIO()
+    with zipfile.ZipFile(small, "w") as zf:
+        zf.writestr("match.dem", service.CS2_MAGIC + b"zip-few-entries")
+    r = client.post("/api/v1/matches", files={"file": ("few.zip", io.BytesIO(small.getvalue()))})
+    assert r.status_code == 202
+    client.delete(f"/api/v1/matches/{r.json()['match']['id']}")
+
+
+def test_a_zip_that_understates_its_entries_is_still_counted(monkeypatch, tmp_path):
+    import struct
+    import zipfile
+
+    from demoreel import service
+
+    archive = tmp_path / "a.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        for i in range(3):
+            zf.writestr(f"{i}.dem", service.CS2_MAGIC)
+    data = bytearray(archive.read_bytes())
+    end = data.rindex(b"PK\x05\x06")
+    data[end + 8:end + 12] = struct.pack("<HH", 1, 1)  # the end record now claims a single entry
+    archive.write_bytes(bytes(data))
+    monkeypatch.setattr(service, "MAX_ZIP_ENTRIES", 2)
+    with pytest.raises(service.ServiceError, match="lists 3 files"):
+        service._open_maybe_compressed(archive)
+    archive.unlink()  # nothing keeps it open (Windows would refuse)
+
+
+def test_a_zip_without_a_demo_is_refused_and_removed(client):
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("readme.txt", b"no demo here")
+    r = client.post("/api/v1/matches", files={"file": ("nodemo.zip", io.BytesIO(buf.getvalue()))})
+    assert r.status_code == 400 and "no .dem" in r.json()["detail"]
+
+
 # ------------------------------------------------------------------------------------------- webhooks
 
 def test_webhook_addresses_are_shown_to_the_organiser_only(client, admin_key):

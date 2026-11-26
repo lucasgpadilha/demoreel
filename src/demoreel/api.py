@@ -13,7 +13,6 @@ Typical flow::
 from __future__ import annotations
 
 import hmac
-import shutil
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -77,27 +76,47 @@ WEB_DIR = Path(__file__).parent / "web"
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
+def _key_in(headers: Headers) -> str:
+    auth = headers.get("authorization", "")
+    return auth[7:] if auth.lower().startswith("bearer ") else headers.get("x-api-key", "")
+
+
 def _given_key(request: Request) -> str:
-    auth = request.headers.get("authorization", "")
-    return auth[7:] if auth.lower().startswith("bearer ") else request.headers.get("x-api-key", "")
+    return _key_in(request.headers)
+
+
+def _same(given: str, key: str) -> bool:
+    return hmac.compare_digest(given.encode(), key.encode())
 
 
 def is_admin(request: Request) -> bool:
     """True when this request may change things: no admin key is configured, or it carries the right one."""
     key = get_settings().admin_key
-    return not key or hmac.compare_digest(_given_key(request).encode(), key.encode())
+    return not key or _same(_given_key(request), key)
+
+
+def _key_problem(method: str, given: str) -> tuple[int, str] | None:
+    """``(status, message)`` when a request with this method and key must be refused, else None."""
+    settings = get_settings()
+    if settings.api_key and not (_same(given, settings.api_key)
+                                 or (settings.admin_key and _same(given, settings.admin_key))):
+        return 401, "Missing or invalid API key (send `Authorization: Bearer <key>` or `X-API-Key`)."
+    if method not in _SAFE_METHODS and settings.admin_key and not _same(given, settings.admin_key):
+        return 403, ("This server is read-only for visitors. Changing anything needs the organiser's "
+                     "key (send `Authorization: Bearer <key>` or `X-API-Key`).")
+    return None
 
 
 def require_key(request: Request) -> None:
-    settings = get_settings()
-    given = _given_key(request)
-    if settings.api_key and not (hmac.compare_digest(given.encode(), settings.api_key.encode())
-                                 or (settings.admin_key and hmac.compare_digest(given.encode(),
-                                                                                settings.admin_key.encode()))):
-        raise HTTPException(401, "Missing or invalid API key (send `Authorization: Bearer <key>` or `X-API-Key`).")
-    if request.method not in _SAFE_METHODS and not is_admin(request):
-        raise HTTPException(403, "This server is read-only for visitors. Changing anything needs the organiser's "
-                                 "key (send `Authorization: Bearer <key>` or `X-API-Key`).")
+    problem = _key_problem(request.method, _given_key(request))
+    if problem:
+        raise HTTPException(*problem)
+
+
+def _upload_too_large() -> str:
+    mb = get_settings().max_upload_mb
+    return (f"The file is larger than this server's upload limit of {mb} MB (DEMOREEL_MAX_UPLOAD_MB). Send "
+            "the demo compressed (.gz, .bz2, .zip), or import it from a folder or a source instead.")
 
 
 api = APIRouter(prefix="/api/v1", dependencies=[Depends(require_key)])
@@ -244,9 +263,17 @@ def upload_match(
         service.resolve_renderer(renderer)  # fail before spooling a few hundred MB to disk
     tmp_dir = settings.data_dir / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
+    limit, written = settings.max_upload_mb * 1024 * 1024, 0
     with tempfile.NamedTemporaryFile(dir=tmp_dir, suffix=".upload", delete=False) as tmp:
-        shutil.copyfileobj(file.file, tmp, length=4 * 1024 * 1024)
         tmp_path = Path(tmp.name)
+        while chunk := file.file.read(4 * 1024 * 1024):
+            written += len(chunk)
+            if written > limit:
+                break
+            tmp.write(chunk)
+    if written > limit:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(413, _upload_too_large())
     with session_scope() as s:
         match, job, created = service.ingest_demo(s, tmp_path, file.filename or "demo.dem",
                                                   auto_render_top=auto_render_top, renderer=renderer, keep_source=False)
@@ -877,6 +904,96 @@ class _BrowserGuard:
         await self.app(scope, receive, send_with_cors)
 
 
+class _BodyTooLarge(Exception):
+    pass
+
+
+_WORKER_JSON_BYTES = 16 * 1024 * 1024  # a worker's list of recordings can be long
+
+
+class _RequestGate:
+    """Refuse from the headers alone, before a byte of the body is read or stored.
+
+    FastAPI resolves the key dependency only after it has loaded the body: a visitor could make the server
+    spool an upload to disk or parse a huge JSON before hearing "403". Here a request under ``/api/v1`` without
+    the key it needs is answered at once, and every body is held to a size (``max_json_kb`` for JSON,
+    ``max_upload_mb`` for a demo upload) whether or not it declares its length.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    @staticmethod
+    def _limit(path: str, method: str) -> int | None:
+        settings = get_settings()
+        if method in _SAFE_METHODS or not path.startswith("/api/"):
+            return None  # /mcp limits its own bodies; other paths take no body
+        if path.rstrip("/") == "/api/v1/matches":
+            return settings.max_upload_mb * 1024 * 1024 + 1024 * 1024  # the multipart wrapping
+        if path.startswith("/api/v1/worker/"):
+            # a result file: the route knows its limit and checks it before and while reading
+            return None if "/files/" in path else max(_WORKER_JSON_BYTES, settings.max_json_kb * 1024)
+        return settings.max_json_kb * 1024
+
+    def _too_large(self, path: str, limit: int) -> str:
+        if path.rstrip("/") == "/api/v1/matches":
+            return _upload_too_large()
+        return (f"The request body is larger than this server accepts here ({limit // 1024} KB, "
+                "DEMOREEL_MAX_JSON_KB). Send less at once (fewer ids, shorter texts).")
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path, method = scope.get("path", ""), scope.get("method", "GET").upper()
+        headers = Headers(scope=scope)
+        if path.startswith("/api/v1/worker/"):
+            if not _key_in(headers):
+                await _answer(send, 401, "Missing or unknown worker token. Send `Authorization: Bearer <token>`; "
+                                         "the organiser creates one with `demoreel workers add <name>`.")
+                return
+        elif path.startswith("/api/"):
+            problem = _key_problem(method, _key_in(headers))
+            if problem:
+                await _answer(send, *problem)
+                return
+        limit = self._limit(path, method)
+        if limit is None:
+            await self.app(scope, receive, send)
+            return
+        declared = headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > limit:
+            await _answer(send, 413, self._too_large(path, limit))
+            return
+        seen, over, started = 0, False, False
+
+        async def counted():
+            nonlocal seen, over
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body") or b"")
+                if seen > limit:
+                    over = True
+                    raise _BodyTooLarge()
+            return message
+
+        async def watched(message):
+            nonlocal started
+            if over:
+                return  # the app's answer to the cut body is replaced by ours below
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, counted, watched)
+        except Exception:
+            if not over:
+                raise
+        if over and not started:
+            await _answer(send, 413, self._too_large(path, limit))
+
+
 class _GzipApi:
     """Compress JSON answers of the API. Videos and other files are left alone: compressing an mp4 costs CPU
     for nothing and breaks range requests (seeking)."""
@@ -956,6 +1073,7 @@ def create_app() -> FastAPI:
                     "is mounted at `/mcp`.",
     )
     app.add_middleware(_GzipApi)
+    app.add_middleware(_RequestGate)
     app.add_middleware(_BrowserGuard)
     app.add_middleware(_McpNoRedirect)
 

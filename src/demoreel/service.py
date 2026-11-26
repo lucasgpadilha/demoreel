@@ -95,6 +95,29 @@ def abs_path(rel: str) -> Path:
 
 # ---------------------------------------------------------------------------------------------- ingest
 
+MAX_ZIP_ENTRIES = 1000
+_MAX_ZIP_INDEX_BYTES = 1024 * 1024
+
+
+def _check_zip_index(src: Path, entries: int | None = None, index_size: int = 0) -> None:
+    """Refuse a zip whose index alone would take a lot of memory (millions of entries). Called before the
+    archive is opened, with the counts its end record declares (the part ZipFile reads, at most
+    ``index_size`` bytes), and again with the real count once it is open."""
+    if entries is None:
+        read_end = getattr(zipfile, "_EndRecData", None)  # private; the check after opening still holds without
+        if read_end is None:
+            return
+        with src.open("rb") as f:
+            end = read_end(f)
+        if end is None:
+            return  # not a valid zip: ZipFile says so
+        entries, index_size = end[zipfile._ECD_ENTRIES_TOTAL], end[zipfile._ECD_SIZE]
+    if entries > MAX_ZIP_ENTRIES or index_size > _MAX_ZIP_INDEX_BYTES:
+        raise ServiceError(f"The zip archive lists {entries} files ({index_size // 1024} KB of names); a demo "
+                           f"archive may hold at most {MAX_ZIP_ENTRIES}. Zip the .dem alone, or send it as .dem, "
+                           ".gz or .bz2.")
+
+
 def _open_maybe_compressed(src: Path):
     with src.open("rb") as f:
         head = f.read(8)
@@ -109,11 +132,18 @@ def _open_maybe_compressed(src: Path):
             raise ServiceError("Zstandard-compressed demos need Python 3.14+. Decompress the .zst first.") from exc
         return zstd.open(src, "rb")
     if head.startswith(b"PK\x03\x04"):
+        _check_zip_index(src)
         zf = zipfile.ZipFile(src)
-        names = [n for n in zf.namelist() if n.lower().endswith(".dem")]
-        if not names:
-            raise ServiceError("The zip archive contains no .dem file.")
-        return zf.open(names[0])
+        try:
+            _check_zip_index(src, len(zf.infolist()))
+            names = [n for n in zf.namelist() if n.lower().endswith(".dem")]
+            if not names:
+                raise ServiceError("The zip archive contains no .dem file.")
+            return zf.open(names[0])
+        finally:
+            # The member keeps the archive open until it is closed itself; without this the archive stayed
+            # open after reading, and Windows cannot delete an open file (the upload was never removed).
+            zf.close()
     return src.open("rb")
 
 
