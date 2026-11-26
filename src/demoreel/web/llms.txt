@@ -14,20 +14,27 @@ Base URL: {BASE_URL}
 
 ## REST flow
 
-1. `POST {BASE_URL}/api/v1/matches` — multipart, field `file` (.dem, optionally .gz/.bz2/.zst/.zip).
+1. `POST {BASE_URL}/api/v1/matches` — multipart, field `file` (.dem, optionally .gz/.bz2/.zip; .zst only
+   when the server runs Python 3.14+).
    Returns 202 `{match, job, created}`. Same demo twice → same match (`created: false`).
 2. `GET {BASE_URL}/api/v1/jobs/{job_id}?wait=30` — long-poll until `done` is true. Do not poll in a tight loop.
 3. Read results:
    - `GET /api/v1/matches/{id}/scoreboard` — compact per-player table
    - `GET /api/v1/matches/{id}/players` · `/rounds` · `/rounds/{n}` · `/kills?attacker=&weapon=&headshot=`
    - `GET /api/v1/matches/{id}/analysis` — everything in one (large) document
-   - `GET /api/v1/matches/{id}/highlights` — best first, each with its rendered videos (`video_url`)
+   - `GET /api/v1/matches/{id}/highlights` — plays, best first, each with its rendered videos (`video_url`).
+     `?category=fail` lists the fails instead (whiffs, team flashes, team kills: banter), `all` both;
+     `featured=true` only the curated best.
 4. Edit a highlight: `POST /api/v1/highlights/{id}/edit` with `{"ops": [...]}` (all-or-nothing):
    `trim`, `set_range`, `set_pov`, `set_camera`, `set_speed`, `set_caption`, `add_segment`, `remove_segment`,
-   `move_segment`, `split_segment`, `set_meta`. Or create one: `POST /api/v1/matches/{id}/highlights`.
-5. Render: `POST /api/v1/highlights/{id}/renders` `{"renderer": "auto" | "radar" | "ingame"}` → 202
-   `{render, job}`; long-poll the job; then `GET /api/v1/renders/{id}` → `video_url`.
-   Several highlights in one video: `POST /api/v1/matches/{id}/reels`.
+   `move_segment`, `split_segment`, `set_meta`. Or create one: `POST /api/v1/matches/{id}/highlights` with
+   `segments`, or `start_tick` + `end_tick` (+ `pov_steamid`), or `round` + `player_steamid`; add
+   `"category": "fail"` to file it with the fails. `PATCH /api/v1/highlights/{id}` changes `title`,
+   `description`, `tags`, `segments` (all of them), `featured`, and `category` of a hand-made clip.
+5. Render: `POST /api/v1/highlights/{id}/renders` `{"renderer": "auto" | "radar" | "ingame", "options":
+   {"format": "16:9" | "9:16" | "1:1"}}` → 202 `{render, job}`; long-poll the job; then
+   `GET /api/v1/renders/{id}` → `video_url`. Several highlights in one video: `POST /api/v1/matches/{id}/reels`.
+   Every video of a match: `POST /api/v1/matches/{id}/produce`.
 6. Optional: `POST /api/v1/webhooks` to be called on `match.ready`, `render.ready`, etc.
 7. Across matches (all GET; filters `night=YYYY-MM-DD`, `match_id`, `since`, `until`; none = every match):
    `/api/v1/insights/nights` · `/insights/rivalries` (who kills whom, nemesis / favourite victim) ·
@@ -39,7 +46,11 @@ Base URL: {BASE_URL}
 
 - Ticks: demo time unit. seconds = ticks / tickrate (64 in CS2). Every tick field is absolute within the demo.
 - Highlight: ordered `segments`, each `{start_tick, end_tick, pov_steamid, speed, caption}`.
-  `speed` 0.5 = slow motion. `pov_steamid: null` = overview camera.
+  `speed` 0.5 = slow motion. `pov_steamid: null` = overview camera. Instead of a player, a segment can have a
+  fixed `camera: {x, y, z, pitch, yaw}` (what `spec_pos` prints in the CS2 console; x/y/z within ±16384,
+  pitch -90..90): only the in-game renderer films it, a 2D replay shows the whole map there and says so in
+  the job result's `warnings`.
+- Category: `play` or `fail`. The analysis decides it for what it finds; a hand-made clip can be either.
 - Editing never alters existing videos; they get `stale: true`. Render again to apply the edit.
 - Renderers: `ingame` = real CS2 footage from the player's point of view (needs a machine with the game);
   `radar` = 2D tactical replay that runs anywhere; `auto` picks in-game when available.

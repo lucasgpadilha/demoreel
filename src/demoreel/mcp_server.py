@@ -409,7 +409,8 @@ def build_server() -> MCPServer:
         "folders). To upload from elsewhere use the REST API: POST /api/v1/matches (multipart field `file`). "
         "Returns match_id and job_id; wait with get_job, then call get_match."))
     @_threaded
-    def import_demo(path: Annotated[str, Field(description="Absolute path to a .dem (or .dem.gz/.bz2/.zip) file.")],
+    def import_demo(path: Annotated[str, Field(description="Absolute path to a .dem (or .dem.gz/.bz2/.zip, and "
+                                                           ".zst when the server runs Python 3.14+) file.")],
                     auto_render_top: Annotated[int | None, Field(ge=0, le=20)] = None) -> dict[str, Any]:
         settings = get_settings()
         src = Path(path).expanduser().resolve()

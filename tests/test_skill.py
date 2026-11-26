@@ -44,17 +44,47 @@ def test_the_repository_skill_packs_with_skill_md_at_the_root(tmp_path):
     assert again.read_bytes() == out.read_bytes(), "the same sources must give the same zip"
 
 
-def test_the_skill_only_names_tools_the_mcp_server_has():
+def _tools(kinds: tuple[str, ...] = ("tool", "prompt")) -> dict[str, set[str]]:
+    """MCP tools (and prompts) the server registers, with their parameter names, read from the source."""
     tree = ast.parse((ROOT / "src" / "demoreel" / "mcp_server.py").read_text(encoding="utf-8"))
-    registered = {
-        node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
-        and any(isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr in {"tool", "prompt"}
+    return {
+        node.name: {a.arg for a in node.args.args + node.args.kwonlyargs}
+        for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+        and any(isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr in kinds
                 for d in node.decorator_list)}
+
+
+def _edit_ops() -> set[str]:
+    from typing import get_args
+
+    from demoreel.schemas import EditOp
+
+    return {get_args(m.model_fields["op"].annotation)[0] for m in get_args(get_args(EditOp)[0])}
+
+
+def test_the_skill_only_names_tools_the_mcp_server_has():
+    registered = set(_tools())
     assert {"list_matches", "get_job", "create_highlight"} <= registered
     named = set(re.findall(r"`([a-z][a-z_]+)\(", (SKILL / "SKILL.md").read_text(encoding="utf-8")))
     assert named, "SKILL.md names no tools"
     unknown = named - registered
     assert not unknown, f"SKILL.md names tools the MCP server does not have: {sorted(unknown)}"
+
+
+def test_the_agent_docs_list_every_tool_and_every_edit_operation():
+    agents = (ROOT / "docs" / "agents.md").read_text(encoding="utf-8")
+    table = agents.split("## Tools", 1)[1].split("\n## ", 1)[0]
+    missing = {name for name in _tools(("tool",)) if f"`{name}`" not in table}
+    assert not missing, f"docs/agents.md (## Tools) does not list: {sorted(missing)}"
+    ops = _edit_ops()
+    assert {"trim", "set_pov", "set_camera"} <= ops
+    llms = (ROOT / "src" / "demoreel" / "web" / "llms.txt").read_text(encoding="utf-8")
+    mcp = (ROOT / "src" / "demoreel" / "mcp_server.py").read_text(encoding="utf-8")
+    for where, text, form in [("docs/agents.md", agents, '"op": "{}"'), ("llms.txt", llms, "`{}`"),
+                              ("the edit_highlight tool", mcp, "{}{{"),
+                              ("SKILL.md", (SKILL / "SKILL.md").read_text(encoding="utf-8"), "`{}`")]:
+        missing = {op for op in ops if form.format(op) not in text}
+        assert not missing, f"{where} does not document the edit operations {sorted(missing)}"
 
 
 def test_the_plugin_manifests_point_at_the_skill_and_the_local_mcp_endpoint():

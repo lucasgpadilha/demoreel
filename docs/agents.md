@@ -43,14 +43,20 @@ server or `demoreel worker` running so analyses and renders get processed.
 |---|---|
 | `list_matches`, `get_match` | Find a match; overview with scoreboard and top highlights |
 | `get_player_stats`, `list_rounds`, `get_round`, `search_kills` | Drill into the data |
-| `list_highlights`, `get_highlight` | Browse clips; read segments before editing |
+| `list_highlights`, `get_highlight` | Browse clips (`category="fail"` for the fails, `"all"` for both); read segments before editing |
+| `set_featured` | Promote a play to the featured ones (they get first-person videos) or take it out; survives re-scoring |
+| `rescore_match` | Re-run scoring and curation on an analyzed match (fast, the demo is not read again) |
 | `create_highlight` | New clip from segments, a tick range, or round + player; `category="fail"` files it under the fails (banter); a segment with `camera` `{x, y, z, pitch, yaw}` (from `spec_pos`) is filmed from that fixed spot instead of a player |
 | `set_category` | Move a hand-made clip between the plays and the fails of its match |
-| `edit_highlight` | Atomic list of edit operations |
-| `render_highlight`, `render_reel` | Produce video (async, optional blocking wait) |
+| `edit_highlight` | Atomic list of edit operations (below) |
+| `delete_highlight` | Delete a clip definition (its videos are kept) |
+| `render_highlight`, `render_reel` | Produce video (async, optional blocking wait); `format` `16:9` / `9:16` / `1:1` |
+| `produce_match` | Every video of a match in one call: 2D of every play, first-person of the featured ones, in each shape |
 | `get_job`, `get_render`, `cancel_job` | Follow long-running work |
+| `get_feed` | The best plays that already have a video, across matches |
 | `import_demo` | Analyze a demo already on the server's disk (whitelisted folders only) |
-| `get_capabilities` | Which renderers this server has |
+| `list_source_matches`, `import_matches` | Matches listed by the community's site (a configured source) and importing them |
+| `get_capabilities`, `list_workers`, `get_brand` | Which renderers this server has; the remote workers (the PC that records) and whether they are online; the community's name, colours and logo |
 | `list_nights`, `get_rivalries`, `get_player_profile`, `get_weapon_rankings`, `get_trophies`, `get_chat_rankings` | Across matches: nights of play, who kills whom (nemesis / favourite victim), one player over the season, who kills the most with each weapon, trophies of a match or a night, chat rankings for banter. All take `night=YYYY-MM-DD` or `match_id`; no filter = every match |
 
 Also: prompt `make_highlight_reel(match_id, player?)` and resource `demoreel://matches/{id}/analysis`.
