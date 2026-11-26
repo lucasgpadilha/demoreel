@@ -1,6 +1,7 @@
 {
   "name": "demoreel",
-  "description": "Turn CS2 demos into match stats, highlight clips and videos: a skill that teaches the agent demoreel, plus its MCP server at http://127.0.0.1:8000/mcp (start it with `uv run demoreel serve`).",
+  "version": "0.1.0",
+  "description": "Turn CS2 demos into match stats, highlight clips and videos: a skill that teaches the agent demoreel, plus a connection to its MCP server (by default a local `uv run demoreel serve` at http://127.0.0.1:8000/mcp; the address and key are asked on install).",
   "author": {
     "name": "Lucas Padilha",
     "url": "https://github.com/lucasgpadilha"
@@ -9,10 +10,30 @@
   "repository": "https://github.com/lucasgpadilha/demoreel",
   "license": "MIT",
   "keywords": ["cs2", "counter-strike", "demo", "highlights", "esports", "mcp"],
+  "userConfig": {
+    "mcp_url": {
+      "type": "string",
+      "title": "demoreel MCP endpoint",
+      "description": "The /mcp address of your demoreel server. Keep the default for a local `uv run demoreel serve`.",
+      "default": "http://127.0.0.1:8000/mcp",
+      "required": false
+    },
+    "api_key": {
+      "type": "string",
+      "title": "demoreel key",
+      "description": "The server's DEMOREEL_ADMIN_KEY (or DEMOREEL_API_KEY when it has no admin key). Leave empty for a server without a key.",
+      "default": "",
+      "sensitive": true,
+      "required": false
+    }
+  },
   "mcpServers": {
     "demoreel": {
       "type": "http",
-      "url": "http://127.0.0.1:8000/mcp"
+      "url": "${user_config.mcp_url}",
+      "headers": {
+        "Authorization": "Bearer ${user_config.api_key}"
+      }
     }
   }
 }

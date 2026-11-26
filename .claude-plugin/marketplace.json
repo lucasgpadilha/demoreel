@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "demoreel",
-      "source": "./",
+      "source": ".",
       "description": "Skill + MCP server for demoreel: CS2 match stats, highlight clips and first-person or 2D videos from demos.",
       "category": "gaming",
       "tags": ["cs2", "counter-strike", "demo", "highlights", "video"]

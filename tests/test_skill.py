@@ -173,10 +173,20 @@ def test_the_plugin_manifests_point_at_the_skill_and_the_local_mcp_endpoint():
     plugin = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     market = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
     entry = next(p for p in market["plugins"] if p["name"] == plugin["name"])
-    assert entry["source"] == "./"  # the repository root is the plugin
+    assert entry["source"] == "."  # the repository root is the plugin (the documented spelling of the root)
     assert (ROOT / "skills" / "demoreel" / "SKILL.md").is_file()
+    from demoreel import __version__
+
+    assert plugin["version"] == __version__, "bump plugin.json with the project: a pinned version is what updates"
+    assert "version" not in entry, "the version lives in plugin.json only"
     server = plugin["mcpServers"]["demoreel"]
-    assert server["type"] == "http" and server["url"].endswith("/mcp")
+    assert server["type"] == "http"
+    # Where the server is and its key are asked at install time; the defaults are a local `demoreel serve`.
+    options = plugin["userConfig"]
+    used = set(re.findall(r"\$\{user_config\.([a-z_]+)\}", json.dumps(server)))
+    assert used == set(options) == {"mcp_url", "api_key"}
+    assert options["mcp_url"]["default"].endswith("/mcp") and options["api_key"]["sensitive"] is True
+    assert all({"type", "title", "description"} <= set(o) for o in options.values())
     assert not (ROOT / ".mcp.json").exists(), "a root .mcp.json would also be the project MCP config of the repo"
 
 

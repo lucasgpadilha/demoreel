@@ -130,12 +130,21 @@ The repository is a plugin marketplace whose only plugin is the repository itsel
 ```
 
 That installs the skill (Claude picks it up on its own, or call it with `/demoreel:demoreel`) and an MCP
-server over HTTP at `http://127.0.0.1:8000/mcp`, so start `uv run demoreel serve` in your clone first. The
-plugin does not run demoreel itself: Claude Code copies plugins into its own cache, where a `demoreel mcp` would
-see a database of its own, with none of your matches and no worker. For a server elsewhere or one with a key,
-add your own connection (`claude mcp add --transport http demoreel <url> --header "Authorization: Bearer
-<key>"`) and disable the plugin's in `/mcp`. `plugin.json` has no `version` on purpose: every commit is an
-update (`/plugin marketplace update demoreel`). Check the manifests with `claude plugin validate .`.
+server over HTTP, so start `uv run demoreel serve` in your clone first. On install the plugin asks for two
+settings: the server's MCP address (default `http://127.0.0.1:8000/mcp`, a local `demoreel serve`) and its key
+(the `DEMOREEL_ADMIN_KEY`, else the `DEMOREEL_API_KEY`; leave it empty for a server without one), which Claude
+Code keeps in the system's credential store. The plugin does not run demoreel itself: Claude Code copies
+plugins into its own cache, where a `demoreel mcp` would see a database of its own, with none of your matches
+and no worker. If the plugin's connection is refused anyway, add your own (`claude mcp add --transport http
+demoreel <url> --header "Authorization: Bearer <key>"`) and disable the plugin's in `/mcp`.
+
+`plugin.json` carries a `version` (the project's, `0.1.0`): users stay on it until it changes, so bump it with
+each release (`tests/test_skill.py` checks that it matches `pyproject.toml`). Users update with `claude plugin
+update demoreel@demoreel` or **Update now** on the plugin in `/plugin`; `/plugin marketplace update demoreel`
+only refreshes the catalog. Check the manifests with `claude plugin validate --strict .`. Because the
+repository root is the plugin, Claude Code copies the whole repository into its cache on install; a
+`plugins/demoreel/` folder with only the manifest and the skill would avoid that, at the cost of a second copy
+of the skill.
 
 ### Other agents and skill marketplaces
 
