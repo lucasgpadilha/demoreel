@@ -66,6 +66,14 @@ or a number such as `14168`) to force one.
 | `DEMOREEL_INGAME_HLAE_EXE` | path of `HLAE.exe` | the highest version under `<data_dir>/cache/hlae/` that has `x64/AfxHookSource2.dll` |
 | `DEMOREEL_INGAME_HLAE_ENCODER` | encoder HLAE pipes frames into: `x264` or `nvenc` (NVIDIA cards) | `x264` |
 | `DEMOREEL_INGAME_CAPTURE_FPS` | minimum recording frame rate; recording time grows with it | `30` |
+| `DEMOREEL_INGAME_COMMANDS` | console commands run before each take, after demoreel's own, separated by `;` or new lines (e.g. `csdm_voice_indicator 1`) | none |
+| `DEMOREEL_INGAME_LAUNCH_ARGS` | extra CS2 launch options, written as on a command line (`-insecure` cannot be removed) | none |
+
+Console commands and launch options are settings of the recording machine only. They used to be per-render
+options (`ingame_commands`, `ingame_launch_args`); a render request that still sends them is refused with an
+error naming the variable above, because a request can come from whoever the API lets in, or from an agent
+that read a player name written to steer it, and HLAE's console commands can write files anywhere on the PC.
+Renders stored before the change are read without them.
 
 Auto-detection: Windows reads `HKCU\Software\Valve\Steam\SteamPath` (then `HKLM`), Linux tries `~/.steam/steam`,
 the snap location, `~/.local/share/Steam` and the flatpak location; `steamapps/libraryfolders.vdf` then gives
@@ -73,7 +81,8 @@ the library that owns app 730.
 
 ### Per-render options
 
-Passed in the render request's `options.extra` (all optional):
+Passed in the render request's `options.extra` (all optional). Keys not listed here (or, for the 2D renderer,
+`camera`, `zoom` and `brand`) are dropped before the render is stored or handed to a worker:
 
 | Key | Effect | Default |
 |---|---|---|
@@ -82,9 +91,11 @@ Passed in the render request's `options.extra` (all optional):
 | `ingame_assists` | show assists in the kill feed | `true` |
 | `ingame_player_voices` | include the players' voice chat recorded in the demo | `false` |
 | `ingame_true_view` | `cl_demo_predict 1` ("TrueView") | `false` |
-| `ingame_commands` | console commands run before each take, after demoreel's own (list, or one string separated by `;`) | none |
-| `ingame_launch_args` | extra CS2 launch options (`-insecure` cannot be removed) | none |
 | `ingame_keep_raw` | keep the TGA/WAV files in the game folder (debugging) | `false` |
+| `ingame_frames` | `"jpg"` or `"tga"` (lossless, ~60x larger) frames from the game's own recorder | `"jpg"` |
+| `ingame_backend` | `"auto"`, `"startmovie"` or `"hlae"` for this render (see [Recording backends](#recording-backends)) | `DEMOREEL_INGAME_BACKEND` |
+| `ingame_hlae_encoder` | `"x264"` or `"nvenc"` for this render | `DEMOREEL_INGAME_HLAE_ENCODER` |
+| `ingame_recapture` | record the footage again even when stored footage covers the clip | `false` |
 | `ingame_swap_red_blue` | swap red and blue while encoding | Linux without the Vulkan layer |
 | `ingame_lock_wait_s` | how long to wait for another recording to finish. A queued job that is still waiting after that goes back to the queue, in its place; it does not fail | 0 for queued jobs, 1800 for a direct render |
 | `ingame_startup_timeout_s` / `ingame_stall_timeout_s` | give up when no frame / no new frame shows up for this long | 300 / 300 |
@@ -110,7 +121,7 @@ Everything below is a port of CS Demo Manager (file names refer to its repositor
      `cl_draw_only_deathnotices`, `tv_listen_voice_indices`), then `demo_gototick <setup tick - 1>`;
    - setup tick (= start - one second of ticks): `spec_show_xray`, `mp_display_kill_assists`,
      `host_framerate <fps>`, the plugin's own panels off (`csdm_buttons_overlay 0`, `csdm_voice_indicator 0`,
-     not in the reference: see [Known pitfalls](#known-pitfalls)), then your `ingame_commands`;
+     not in the reference: see [Known pitfalls](#known-pitfalls)), then the machine's `DEMOREEL_INGAME_COMMANDS`;
    - start - 4: `pause_playback` (the plugin pauses 2 s so the loading tint is not recorded);
    - start: `spec_mode 1`, `spec_player <slot>`, `startmovie <n>-sequence`. A segment with a fixed `camera`
      (`{x, y, z, pitch, yaw}`, the numbers `spec_pos` prints in the console) gets `cl_demo_freecam 0` and
@@ -240,8 +251,10 @@ like its takes (`<n>-sequence…`) are deleted, then the folders left empty.
   follows the voice data of the demo **whether or not `ingame_player_voices` is on**, and the buttons overlay
   (keys pressed by the spectated player) when the machine's owner turned it on in CS Demo Manager (the plugin
   remembers both in `game/csgo/cfg/csdm_settings.json`). Every take therefore runs `csdm_buttons_overlay 0` and
-  `csdm_voice_indicator 0`. To have one in the picture, ask for it: `ingame_commands` runs afterwards, so
-  `["csdm_voice_indicator 1"]` brings the indicator back. The playback panel is hidden by default and
+  `csdm_voice_indicator 0`. To have one in the picture, set it on the recording machine:
+  `DEMOREEL_INGAME_COMMANDS=csdm_voice_indicator 1` runs afterwards and brings the indicator back (stored
+  footage is reused as it was recorded whatever the machine's commands are now: use `ingame_recapture` to
+  record it again). The playback panel is hidden by default and
   nothing is sent for it. Footage captured before this was the default keeps the panel
   it was recorded with. Hiding the voice indicator this way was checked in a real recording; the buttons
   overlay command and the built-in default were not (see [What is not verified](#what-is-not-verified)).
@@ -318,7 +331,7 @@ Later runs (2026-11-15, same machine) validated the two-stage pipeline through t
 
 A recording on 2026-11-18 (CS2 patch 14198) of a demo from another platform, which carries the players' voice
 chat, had the plugin's voice indicator in the picture for half of the clip although `ingame_player_voices` was
-off; the same recording with `csdm_voice_indicator 0` passed through `ingame_commands` did not. That is the
+off; the same recording with `csdm_voice_indicator 0` passed through `ingame_commands` (then a per-render option) did not. That is the
 command, on the tick, that every take now runs by itself.
 
 The first run also found one defect, now fixed and covered by a test: CS2 writes `ServerConfig.vdf` and
@@ -338,7 +351,7 @@ The first run also found one defect, now fixed and covered by a test: CS2 writes
 - The recording uses the game's default settings (private config folder), not the machine owner's: default
   crosshair, viewmodel and video quality. Choosing those per render is not implemented yet.
 - The plugin panels, beyond the one run above: `csdm_voice_indicator 0` sent by the recorder itself rather than
-  through `ingame_commands` (same command and tick, covered by tests with a fake game only), on each recording
+  through the old `ingame_commands` (same command and tick, covered by tests with a fake game only), on each recording
   backend, and `csdm_buttons_overlay 0` at all; a frozen plugin build from before the panels existed, where both commands
   are unknown to the game; and `csdm_settings.json` being put back after a real session (the plugin's source
   says it writes the file within 128 frames of a change and on shutdown; the restore runs once the game is

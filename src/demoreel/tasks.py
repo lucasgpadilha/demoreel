@@ -343,7 +343,7 @@ def render(ctx: jobs.JobContext) -> dict[str, Any]:
         r.status, r.error = "running", None
         r.highlight_versions = {hid: rows[hid].version for hid in r.highlight_ids if hid in rows}
         renderer_name, kind = r.renderer, r.kind
-        o = RenderOptionsIn.model_validate(r.options or {})
+        o = RenderOptionsIn.model_validate(r.options or {}, context={"stored": True})
         brand = brand_for(m.brand)
         match_id = m.id
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field, ValidationInfo, field_validator
 
 from .analysis.schema import HighlightSegment, SegmentCamera
 
@@ -78,7 +78,37 @@ class RenderOptionsIn(BaseModel):
                                                 "instead of in real time (default: on).")
     chat: bool | None = Field(None, description="In-game videos: show what the lobby typed about the play at the "
                                                 "end of it (default: as the brand kit says, on).")
-    extra: dict[str, Any] = Field(default_factory=dict, description="Renderer specific options.")
+    extra: dict[str, Any] = Field(default_factory=dict, description=(
+        "Renderer specific options, as documented: radar `camera`, `zoom`, `brand`; in-game `ingame_hud`, "
+        "`ingame_xray`, `ingame_backend`... (docs/ingame-recording.md). Other keys are dropped. Console commands "
+        "and launch options are not taken per render: they are settings of the recording machine."))
+
+    @field_validator("extra")
+    @classmethod
+    def _documented_extra(cls, value: dict[str, Any], info: ValidationInfo) -> dict[str, Any]:
+        """Keep the documented keys only, before the options are stored or handed to a worker. The keys that
+        used to pass console commands / launch options to CS2 are refused with where they live now - except
+        in options stored before (validated with ``context={"stored": True}``), where they are dropped."""
+        stored = bool(info.context and info.context.get("stored"))
+        for key, env in RENDER_EXTRA_MACHINE_ONLY.items():
+            if key in value and not stored:
+                raise ValueError(
+                    f"extra.{key} is not accepted per render: console commands and CS2 launch options are a "
+                    f"setting of the recording machine ({env}, see docs/ingame-recording.md). Per-render keys: "
+                    f"{', '.join(sorted(RENDER_EXTRA_KEYS))}.")
+        return {k: v for k, v in value.items() if k in RENDER_EXTRA_KEYS}
+
+
+# What `RenderOptionsIn.extra` may carry (docs/ingame-recording.md "Per-render options", the radar renderer's
+# docstring). Anything else is dropped rather than stored and passed on to a renderer or a remote worker.
+RENDER_EXTRA_KEYS = frozenset({
+    "camera", "zoom", "brand",  # radar
+    "ingame_hud", "ingame_xray", "ingame_assists", "ingame_player_voices", "ingame_true_view", "ingame_keep_raw",
+    "ingame_swap_red_blue", "ingame_lock_wait_s", "ingame_startup_timeout_s", "ingame_stall_timeout_s",
+    "ingame_plugin_timeout_s", "ingame_frames", "ingame_backend", "ingame_hlae_encoder", "ingame_recapture",
+})
+RENDER_EXTRA_MACHINE_ONLY = {"ingame_commands": "DEMOREEL_INGAME_COMMANDS",
+                             "ingame_launch_args": "DEMOREEL_INGAME_LAUNCH_ARGS"}
 
 
 class RenderOut(BaseModel):

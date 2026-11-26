@@ -526,19 +526,26 @@ def test_render_propagates_cancellation_and_cleans_up(env):
 
 
 def test_per_job_options_reach_the_actions_file_and_unknown_players_only_warn(env):
+    from dataclasses import replace
+
     settings, demo, tmp_path = env
     add_plugin(settings)
+    # console commands and launch options are the recording machine's (DEMOREEL_INGAME_COMMANDS / _LAUNCH_ARGS)
+    settings = replace(settings, console_commands=("cl_drawhud_force_radar 0", "fov_cs_debug 90"),
+                       launch_args=("-noborder",))
     game = FakeGame(settings)
     job = make_job(demo, tmp_path, [Clip(segments=[ClipSegment(8000, 8032, "BOT:Hank", speed=0.5)])])
     job.options.extra.update({"ingame_hud": "full", "ingame_xray": True, "ingame_player_voices": "yes",
-                              "ingame_commands": "cl_drawhud_force_radar 0; fov_cs_debug 90",
-                              "ingame_launch_args": ["-noborder"]})
+                              # a request that still sends these reaches neither the console nor the command line
+                              "ingame_commands": "mirv_streams settings add x; bind x quit",
+                              "ingame_launch_args": ["-sneaky"]})
     result = renderer_for(settings, game).render(job)
     commands = [a["cmd"] for a in game.calls[0]["sequences"][0]["actions"]]
     assert "cl_draw_only_deathnotices 0" in commands and "spec_show_xray 1" in commands
     assert "tv_listen_voice_indices -1" in commands
     assert "cl_drawhud_force_radar 0" in commands and "fov_cs_debug 90" in commands
+    assert not any("settings add x" in c or c.startswith("bind") for c in commands)
     assert not any(c.startswith("spec_player") for c in commands)
-    assert "-noborder" in game.calls[0]["command"]
+    assert "-noborder" in game.calls[0]["command"] and "-sneaky" not in game.calls[0]["command"]
     warnings = " ".join(result.details["warnings"])
     assert "BOT:Hank" in warnings and "speed is ignored" in warnings

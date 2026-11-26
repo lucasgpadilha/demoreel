@@ -38,7 +38,7 @@ from .brand import brand_for
 from .config import get_settings
 from .db import Highlight, Job, Render, Worker, WorkerMaster, now, session_scope
 from .render.base import segment_view
-from .schemas import JobOut, WorkerFinish, WorkerOut
+from .schemas import JobOut, RenderOptionsIn, WorkerFinish, WorkerOut
 from .webhooks import emit
 
 log = logging.getLogger("demoreel.workers")
@@ -227,6 +227,15 @@ def _clips(s: Session, highlight_ids: list[str]) -> list[dict[str, Any]]:
     return out
 
 
+def _render_options(stored: dict[str, Any] | None) -> dict[str, Any]:
+    """A render's options as a worker may see them: what the schema documents, nothing else - a render stored
+    before console commands became the recording machine's setting does not pass them on."""
+    try:
+        return RenderOptionsIn.model_validate(stored or {}, context={"stored": True}).model_dump(exclude_none=True)
+    except ValidationError:
+        return {}
+
+
 def job_spec(s: Session, job: Job) -> dict[str, Any]:
     """Everything a worker needs to do this job, as data. Also marks the thing being made as started."""
     settings = get_settings()
@@ -262,7 +271,7 @@ def job_spec(s: Session, job: Job) -> dict[str, Any]:
         r.status, r.error = "running", None
         r.highlight_versions = {c["highlight_id"]: c["version"] for c in clips}
         spec["render"] = {"id": r.id, "kind": r.kind, "renderer": r.renderer, "title": r.title,
-                          "options": dict(r.options or {})}
+                          "options": _render_options(r.options)}
         spec["clips"] = clips
     elif job.type == "capture_match":
         spec["clips"] = _clips(s, list((job.payload or {}).get("highlight_ids") or []))

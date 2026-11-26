@@ -12,10 +12,11 @@ pipes the frames straight into ffmpeg; Windows only):
 
 Per-job knobs in ``RenderOptions.extra`` (all optional): ``ingame_hud`` ("deathnotices" | "full"),
 ``ingame_xray`` ("auto" | bool, see ``xray.py``), ``ingame_assists``, ``ingame_player_voices``, ``ingame_true_view`` (bools),
-``ingame_commands`` (list of console commands run before each take), ``ingame_launch_args`` (list),
 ``ingame_keep_raw``, ``ingame_swap_red_blue`` (bools), ``ingame_lock_wait_s``, ``ingame_startup_timeout_s``,
-``ingame_stall_timeout_s`` (seconds), ``ingame_frames`` ("jpg" | "tga"), ``ingame_backend`` ("auto" |
-"startmovie" | "hlae") and ``ingame_hlae_encoder`` ("x264" | "nvenc").
+``ingame_stall_timeout_s``, ``ingame_plugin_timeout_s`` (seconds), ``ingame_frames`` ("jpg" | "tga"),
+``ingame_backend`` ("auto" | "startmovie" | "hlae") and ``ingame_hlae_encoder`` ("x264" | "nvenc"). Console
+commands and launch options are the recording machine's settings (``DEMOREEL_INGAME_COMMANDS``,
+``DEMOREEL_INGAME_LAUNCH_ARGS``), never a request's.
 """
 
 from __future__ import annotations
@@ -24,7 +25,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -104,24 +104,6 @@ def _number(extra: dict[str, Any], key: str, default: float) -> float:
         return float(extra.get(key, default))
     except (TypeError, ValueError):
         return default
-
-
-def _console_commands(value: Any) -> tuple[str, ...]:
-    """``ingame_commands``: a list of commands, or one string with a command per line / separated by ``;``."""
-    if value is None:
-        return ()
-    items = re.split(r"[\n;]", value) if isinstance(value, str) else [str(v) for v in value]
-    return tuple(item.strip() for item in items if item.strip())
-
-
-def _string_list(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return shlex.split(value)
-    if isinstance(value, Iterable):
-        return [str(v) for v in value]
-    return []
 
 
 class IngameRenderer:
@@ -476,7 +458,7 @@ class IngameRenderer:
             show_assists=_flag(extra, "ingame_assists", True),
             player_voices=_flag(extra, "ingame_player_voices", False),
             true_view=_flag(extra, "ingame_true_view", False),
-            extra_commands=_console_commands(extra.get("ingame_commands")),
+            extra_commands=settings.console_commands,  # the machine's setting; never a request's
             recording_system=backend, max_tick=max_tick,
             frame_format=frame_format, hlae_output_dir=hlae_dir.as_posix(),
             hlae_ffmpeg_args=self._hlae_encoder(extra, settings))
@@ -540,8 +522,7 @@ class IngameRenderer:
                                   "the demoreel data folder (DEMOREEL_DATA_DIR) - or, for `demoreel render`, the "
                                   "output file - to a path without accents or special characters.")
         settings.cfg_dir.mkdir(parents=True, exist_ok=True)
-        game_args = launcher.build_launch_args(staged.path, width, height,
-                                               _string_list(extra.get("ingame_launch_args")))
+        game_args = launcher.build_launch_args(staged.path, width, height, settings.launch_args)
         if hlae:
             command = launcher.build_hlae_command(settings, game_args)
             launcher.register_hlae_ffmpeg(settings.hlae_exe, ffmpeg.ffmpeg_path())  # type: ignore[arg-type]

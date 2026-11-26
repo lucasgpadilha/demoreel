@@ -21,7 +21,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from . import __version__, insights, jobs, service
 from .analysis.schema import HighlightSegment, MatchAnalysis
@@ -332,7 +332,12 @@ def build_server() -> MCPServer:
     # ------------------------------------------------------------------ renders & jobs
     def _render_opts(width: int | None, height: int | None, fps: int | None, extra: dict[str, Any] | None,
                      fmt: str | None = None) -> RenderOptionsIn:
-        return RenderOptionsIn(format=fmt, width=width, height=height, fps=fps, extra=extra or {})
+        try:
+            return RenderOptionsIn(format=fmt, width=width, height=height, fps=fps, extra=extra or {})
+        except ValidationError as exc:  # e.g. extra.ingame_commands: say what is wrong and what is valid
+            first = exc.errors()[0]
+            where = ".".join(str(x) for x in first.get("loc", ())) or "options"
+            raise service.ServiceError(f"{where}: {first.get('msg', 'invalid')}".replace("Value error, ", "")) from exc
 
     @mcp.tool(annotations=WRITE, description=(
         "Render a highlight to an mp4 (asynchronous). renderer: 'auto' (in-game POV if this server can, else "

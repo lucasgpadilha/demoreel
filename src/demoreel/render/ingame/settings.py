@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -35,6 +36,10 @@ ENV_RUNTIME_SCRIPT = "DEMOREEL_INGAME_RUNTIME_SCRIPT"
 ENV_BACKEND = "DEMOREEL_INGAME_BACKEND"  # auto (default: hlae where it is installed, else startmovie) | startmovie | hlae
 ENV_HLAE_ENCODER = "DEMOREEL_INGAME_HLAE_ENCODER"  # x264 (default) | nvenc
 ENV_HLAE_EXE = "DEMOREEL_INGAME_HLAE_EXE"  # HLAE.exe; default: highest version in <data_dir>/cache/hlae/*/
+# What the game runs and is started with: set by whoever owns the recording machine, never by a render request
+# (a request can come from anybody the API lets in, or from an agent that read a hostile player name).
+ENV_COMMANDS = "DEMOREEL_INGAME_COMMANDS"  # console commands run before each take, separated by ';' or lines
+ENV_LAUNCH_ARGS = "DEMOREEL_INGAME_LAUNCH_ARGS"  # extra CS2 launch options, written as on a command line
 
 # HLAE's hook for CS2; a folder without it cannot record CS2 (an old release, or a partial extraction).
 HLAE_HOOK_DLL = ("x64", "AfxHookSource2.dll")
@@ -60,6 +65,24 @@ class HlaeInstall:
     @property
     def hook_dll(self) -> Path:
         return self.exe.parent.joinpath(*HLAE_HOOK_DLL)
+
+
+def split_commands(value: Any) -> tuple[str, ...]:
+    """Console commands given as a list, or as one string with a command per line / separated by ``;``."""
+    if value is None:
+        return ()
+    items = re.split(r"[\n;]", value) if isinstance(value, str) else [str(v) for v in value]
+    return tuple(item.strip() for item in items if item.strip())
+
+
+def split_launch_args(value: str | None, platform: str = sys.platform) -> tuple[str, ...]:
+    """Launch options written as on a command line (quotes group words). Unbalanced quotes: none at all,
+    rather than options cut in the wrong place."""
+    try:
+        parts = shlex.split(value or "", posix=platform != "win32")
+    except ValueError:
+        return ()
+    return tuple(p.strip('"') for p in parts if p.strip('"'))
 
 
 def hlae_installs(root: Path) -> list[HlaeInstall]:
@@ -89,6 +112,8 @@ class IngameSettings:
     backend: str = "auto"  # recording system used when a render does not name one
     hlae_exe: Path | None = None  # HLAE.exe (Windows only), for the "hlae" backend
     hlae_encoder: str = "x264"  # encoder HLAE pipes the frames into
+    console_commands: tuple[str, ...] = ()  # DEMOREEL_INGAME_COMMANDS: run last at each take's setup tick
+    launch_args: tuple[str, ...] = ()  # DEMOREEL_INGAME_LAUNCH_ARGS (``-insecure`` cannot be removed)
 
     @property
     def hlae_available(self) -> bool:
@@ -403,6 +428,8 @@ def load(env: Mapping[str, str] | None = None, data_dir: Path | None = None,
         backend=(environ.get(ENV_BACKEND) or "auto").strip().lower() or "auto",
         hlae_exe=hlae_exe,
         hlae_encoder=(environ.get(ENV_HLAE_ENCODER) or "x264").strip().lower() or "x264",
+        console_commands=split_commands(environ.get(ENV_COMMANDS)),
+        launch_args=split_launch_args(environ.get(ENV_LAUNCH_ARGS), platform),
         cs2_dir=cs2_dir,
         steam_dir=steam_dir,
         steam_exe=steam_exe,
