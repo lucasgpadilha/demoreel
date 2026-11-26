@@ -1,8 +1,8 @@
 ---
 name: demoreel
-description: Analyze Counter-Strike 2 (CS2) demos with demoreel and turn them into match stats, highlight clips and videos. Use when the user has a CS2 .dem file or a demoreel server and asks for a scoreboard, player or round stats (K/D, ADR, KAST, rating, clutches, opening duels), rivalries, trophies or weapon rankings across matches, the best plays or the fails of a match, a hand-made clip of one moment, or rendered highlight videos and reels (first-person in-game footage or a 2D radar replay).
+description: Analyze Counter-Strike 2 (CS2) demos with demoreel and turn them into match stats, highlight clips and videos. Use when the user has a CS2 .dem file or a demoreel server and asks for a scoreboard, player or round stats (K/D, ADR, KAST, rating, clutches, opening duels), rivalries, trophies or weapon rankings across matches, the best plays or the fails of a match, a hand-made clip of one moment, or rendered highlight videos and reels (first-person in-game footage or a 2D radar replay). Not for CS:GO demos or live match data.
 license: MIT
-compatibility: Needs a running demoreel server (github.com/lucasgpadilha/demoreel, installed with uv; Windows or Linux). First-person video recording also needs Counter-Strike 2 through Steam and a GPU on the same machine; HLAE is optional.
+compatibility: Needs a running demoreel server, 0.1.0 or newer (github.com/lucasgpadilha/demoreel; git and uv to install it; Windows or Linux, not macOS). First-person video recording also needs Counter-Strike 2 through Steam, a GPU and a third-party playback plugin on the same machine; HLAE is optional.
 ---
 
 # demoreel
@@ -15,15 +15,21 @@ or its REST API. Everything slow is a job you wait on.
 
 - If tools such as `list_matches` and `get_match` are available, you are connected: call `get_capabilities()`
   to see which renderers this server has, then go to section 3.
-- Otherwise check for a server: `curl -s http://127.0.0.1:8000/health`. If nothing answers, the user has to
-  install and start it. Ask before installing anything on their machine.
+- Otherwise check for a server: `curl -s http://127.0.0.1:8000/health` (in Windows PowerShell type
+  `curl.exe`: there `curl` is another command). If nothing answers, the user has to install and start it. Ask
+  before installing anything on their machine.
+- This skill was tested with demoreel 0.1.0 and later. `get_capabilities()` and `GET /health` both return the
+  server's `version`; with an older one, tools named here may be missing: ask the user to update the clone
+  (`git pull`, then `uv sync`).
 
 | Needed for | What |
 |---|---|
-| Everything | [uv](https://docs.astral.sh/uv/getting-started/installation/) (brings Python 3.11+) and demoreel. ffmpeg is bundled. Windows or Linux. |
-| 2D radar videos | Nothing more (CPU only, works in a container). |
-| First-person (`ingame`) videos | A PC with Counter-Strike 2 installed through Steam, Steam running and logged in, a GPU that runs CS2, the CS Demo Manager playback plugin binary copied by the user, and `DEMOREEL_INGAME_ENABLED=1`. Setup: [docs/ingame-recording.md](https://github.com/lucasgpadilha/demoreel/blob/main/docs/ingame-recording.md). |
+| Everything | [git](https://git-scm.com/downloads), [uv](https://docs.astral.sh/uv/getting-started/installation/) and demoreel. uv downloads Python and the dependencies, so the first run needs internet. ffmpeg is bundled. Windows or Linux; macOS is not supported. |
+| Linux | The libraries the video drawing needs: `sudo apt-get install -y libgl1 libegl1 libfontconfig1` (Debian/Ubuntu). A minimal server or WSL lacks them: `uv sync` works, then the first video fails. |
+| 2D radar videos | Nothing more (CPU only, works in a container). The first one downloads the map images (from the awpy-data project); with `DEMOREEL_OFFLINE=1` the map is a plain grid. |
+| First-person (`ingame`) videos | A PC with Counter-Strike 2 installed through Steam, Steam running and logged in, a GPU that runs CS2, `DEMOREEL_INGAME_ENABLED=1`, and the CS Demo Manager playback plugin: a third-party binary (MIT) that demoreel does not ship, which the user downloads and copies in. Setup: [docs/ingame-recording.md](https://github.com/lucasgpadilha/demoreel/blob/main/docs/ingame-recording.md). |
 | Faster in-game recording (optional) | [HLAE](https://github.com/advancedfx/advancedfx/releases) on Windows, extracted to `<data_dir>/cache/hlae/<version>/`. |
+| `.zst` demos | Python 3.14+ on the server (the clone pins 3.13); otherwise decompress them first. `.dem`, `.gz`, `.bz2` and `.zip` always work. |
 
 ```bash
 git clone https://github.com/lucasgpadilha/demoreel && cd demoreel
@@ -49,10 +55,11 @@ for a recording and restores everything it touched afterwards.
 ## 3. Flows
 
 Players are named by SteamID or by (part of) their in-game name; an ambiguous name returns the candidates.
-Ticks are demo time: seconds = ticks / 64.
+Ticks are demo time: seconds = ticks / tickrate (`get_match` gives the match's `tickrate`, 64 for CS2).
 
-**Register a demo.** A file in one of the server's `DEMOREEL_IMPORT_DIRS`: `import_demo(path)` returns
-`match_id` and `job_id`. Any other file: upload it over REST (`POST /api/v1/matches`, multipart field `file`).
+**Register a demo.** CS2 demos only (`.dem`; CS:GO demos are refused). A file in one of the server's
+`DEMOREEL_IMPORT_DIRS`: `import_demo(path)` returns `match_id` and `job_id`. Any other file: upload it over
+REST (`POST /api/v1/matches`, multipart field `file`; `curl.exe -F "file=@match.dem" …` in Windows PowerShell).
 From the community's match site: `list_source_matches()` then `import_matches(source_id, remote_ids)`.
 
 **Wait for the analysis.** `get_job(job_id, wait_seconds=60)` blocks until the job finishes (about 10 s for a
@@ -95,8 +102,9 @@ are kept and flagged `stale`; render again.
 ```
 
 **Render.** `render_highlight(highlight_id, renderer="auto", wait_seconds=90)`; `renderer` is `auto`
-(first-person when this server can, else 2D), `ingame` or `radar`. `format="9:16"` makes a vertical video laid
-out for phones (`"1:1"` square; default `"16:9"`), on `render_reel` too. Several clips in one video:
+(first-person when this server can, else 2D), `ingame` or `radar`. For a vertical video laid out for phones:
+`render_highlight(highlight_id, format="9:16")` (`"1:1"` square; default `"16:9"`), on `render_reel` too.
+Several clips in one video:
 `render_reel(match_id, highlight_ids=[...])` or `render_reel(match_id, top=5, player=...)`. Every video of a
 match in 16:9 and 9:16 in one call: `produce_match(match_id)`. All return a `job_id`.
 

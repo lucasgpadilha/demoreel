@@ -152,7 +152,11 @@ The zip has `SKILL.md` at its root and `references/` next to it, LF line endings
 sources, same bytes). The script refuses frontmatter without a valid `name` and `description`, files outside
 `references/`, `scripts/` and `assets/`, relative links that would break once zipped (link to the repository
 instead) and archives over 50 MB. `tests/test_skill.py` also checks that every tool the skill names exists in
-the MCP server, so keep the skill in step when a tool is renamed.
+the MCP server and takes the parameters the skill passes it, that every REST route in
+`references/rest-api.md` exists in the API, and that the skill states a demoreel version no newer than the
+code; keep the skill in step when a tool, a parameter or a route changes. The skill says it was tested with
+demoreel 0.1.0 and later and tells the agent to compare that with the `version` of `GET /health` or
+`get_capabilities()`.
 
 Suggested listing text (free listing; links to this repository are fine, offers of paid versions elsewhere
 are not):
@@ -164,10 +168,15 @@ are not):
 > fails, rivalries and trophies across matches, hand-made clips (fixed camera spots included) and rendered
 > videos, either first-person game footage or a 2D radar replay, in 16:9 and 9:16 for phones.
 >
-> **Requirements.** demoreel installed and running on Windows or Linux (`git clone
-> https://github.com/lucasgpadilha/demoreel`, `uv sync`, `uv run demoreel serve`; uv brings Python) and an
-> agent that can use MCP or call a REST API. First-person video recording also needs Counter-Strike 2 through
-> Steam and a GPU on the same machine (HLAE optional). Stats, highlights and 2D videos need neither.
+> **Requirements.** demoreel 0.1.0 or newer, installed and running on Windows or Linux (macOS is not
+> supported), and an agent that can use MCP or call a REST API. Installing takes git and uv (`git clone
+> https://github.com/lucasgpadilha/demoreel`, `uv sync`, `uv run demoreel serve`); uv downloads Python, so the
+> first run needs internet, and so does the first 2D video (it fetches the map images). On Linux, also
+> `sudo apt-get install -y libgl1 libegl1 libfontconfig1`. First-person video recording also needs
+> Counter-Strike 2 through Steam and a GPU on the same machine, plus the CS Demo Manager playback plugin, a
+> third-party binary (MIT) you download yourself; HLAE is optional. Stats, highlights and 2D videos need none
+> of that. CS2 demos only (`.dem`, `.gz`, `.bz2`, `.zip`; `.zst` with Python 3.14+): not for CS:GO demos or
+> live match data. On Windows PowerShell, call `curl.exe` rather than `curl`.
 > The skill is instructions only (no binaries or scripts); it talks to your own demoreel server.
 >
 > Source, documentation and issues: https://github.com/lucasgpadilha/demoreel. Not affiliated with Valve.

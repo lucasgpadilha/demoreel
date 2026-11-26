@@ -291,7 +291,10 @@ def test_a_worker_takes_the_game_before_it_takes_a_recording_job():
 # ------------------------------------------------------------------------------------------- HTTP
 
 def test_health_and_capabilities(client):
-    assert client.get("/health").json()["status"] == "ok"
+    from demoreel import __version__
+
+    health = client.get("/health").json()
+    assert health["status"] == "ok" and health["version"] == __version__  # the skill tells agents to check it
     caps = client.get("/api/v1/capabilities").json()
     assert {r["name"] for r in caps["renderers"]} == {"radar", "ingame"}
     ingame = next(r for r in caps["renderers"] if r["name"] == "ingame")

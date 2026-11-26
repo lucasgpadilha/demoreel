@@ -39,6 +39,7 @@ def test_the_repository_skill_packs_with_skill_md_at_the_root(tmp_path):
         fields = bsz.frontmatter(zf.read("SKILL.md").decode("utf-8"))
     assert fields["name"] == "demoreel"
     assert "CS2" in fields["description"] and len(fields["description"]) <= 1024
+    assert "Not for CS:GO" in fields["description"]  # what it is not for, so it does not trigger on those
     assert out.stat().st_size < bsz.MAX_BYTES
     again = bsz.build(SKILL, tmp_path / "again.zip")
     assert again.read_bytes() == out.read_bytes(), "the same sources must give the same zip"
@@ -69,6 +70,87 @@ def test_the_skill_only_names_tools_the_mcp_server_has():
     assert named, "SKILL.md names no tools"
     unknown = named - registered
     assert not unknown, f"SKILL.md names tools the MCP server does not have: {sorted(unknown)}"
+
+
+def test_the_skill_says_which_demoreel_it_was_tested_with():
+    import tomllib
+
+    from demoreel import __version__
+
+    assert tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"] == __version__
+    text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    m = re.search(r"tested with demoreel (\d+)\.(\d+)\.(\d+)", text)
+    assert m, "SKILL.md must say which demoreel version it was tested with"
+    assert tuple(map(int, m.groups())) <= tuple(map(int, __version__.split("."))), "the skill is ahead of the code"
+    assert "GET /health" in text and "version" in text  # and how to check the server's
+
+
+CALL = re.compile(r"`([a-z][a-z_]+)\(([^`]*)\)`")
+ROUTE = re.compile(r"`(GET|POST|PATCH|PUT|DELETE) (/[^`\s]*)`|`(/[^`\s]*)`")
+
+
+def _top_level(args: str) -> list[str]:
+    """Arguments of a call as written in the skill, split on the commas that are not inside brackets."""
+    out, depth, cur = [], 0, ""
+    for ch in args:
+        depth += ch in "([{"
+        depth -= ch in ")]}"
+        if ch == "," and depth == 0:
+            out.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    return [*out, cur]
+
+
+def test_the_skill_only_names_parameters_the_tools_take():
+    tools = _tools()
+    checked, wrong = 0, []
+    for name, args in CALL.findall((SKILL / "SKILL.md").read_text(encoding="utf-8")):
+        for arg in _top_level(args):
+            m = re.match(r"^([a-z_][a-z0-9_]*)\s*(?:=|$)", arg.strip())
+            if m is None:
+                continue  # a literal value ("play") or "..."
+            checked += 1
+            if m.group(1) not in tools.get(name, set()):
+                wrong.append(f"{name}({m.group(1)}=)")
+    assert checked >= 20, "the parameter check found almost no calls in SKILL.md"
+    assert not wrong, f"SKILL.md passes parameters the tools do not take: {wrong}"
+
+
+def _documented_routes(text: str) -> list[tuple[str, str]]:
+    """(method, path) of every route named as `GET /path`. A bare `/path` after one on the same line continues
+    it, as the reference's tables write them: same method, and the same prefix up to the shared segment
+    (`/players/{steamid}` after `GET /api/v1/matches/{id}/players`) or the parent (`/rounds`)."""
+    out = []
+    for line in text.splitlines():
+        method = base = None
+        for m in ROUTE.finditer(line):
+            if m.group(1):
+                method, base = m.group(1), m.group(2).split("?")[0]
+                path = base
+            elif base is not None:
+                short = m.group(3).split("?")[0].strip("/").split("/")
+                parts = base.strip("/").split("/")
+                prefix = parts[:parts.index(short[0])] if short[0] in parts else parts[:-1]
+                path = "/" + "/".join(prefix + short)
+            else:
+                continue  # `/llms.txt` in a sentence: a page, not an API call
+            out.append((method, re.sub(r"\{[^}]*\}", "{}", path)))
+    return out
+
+
+def test_the_rest_reference_only_names_routes_the_api_has():
+    from demoreel.api import create_app
+
+    paths = create_app().openapi()["paths"]
+    real = {(m.upper(), re.sub(r"\{[^}]*\}", "{}", p)) for p, ops in paths.items() for m in ops}
+    reference = (SKILL / "references" / "rest-api.md").read_text(encoding="utf-8")
+    named = _documented_routes(reference) + _documented_routes((SKILL / "SKILL.md").read_text(encoding="utf-8"))
+    assert ("GET", "/api/v1/matches/{}/players/{}") in named and ("GET", "/api/v1/insights/chat") in named
+    assert len(named) >= 25, "the route check found almost no routes in the REST reference"
+    unknown = sorted({f"{m} {p}" for m, p in named if (m, p) not in real})
+    assert not unknown, f"the skill names REST routes the API does not have: {unknown}"
 
 
 def test_the_agent_docs_list_every_tool_and_every_edit_operation():
