@@ -11,6 +11,7 @@ os.environ["DEMOREEL_DATA_DIR"] = _TMP
 os.environ["DEMOREEL_OFFLINE"] = "1"  # never download radar images from tests
 os.environ["DEMOREEL_AUTO_RENDER_TOP"] = "0"
 os.environ["DEMOREEL_ICONS_FROM_GAME"] = "0"  # never read a CS2 install from tests
+os.environ["DEMOREEL_ALLOWED_HOSTS"] = '["testserver"]'  # the host name FastAPI's TestClient sends
 os.environ.pop("DEMOREEL_API_KEY", None)
 
 import pytest  # noqa: E402

@@ -15,7 +15,6 @@ from __future__ import annotations
 import functools
 from pathlib import Path
 from typing import Annotated, Any, Literal
-from urllib.parse import urlparse
 
 import anyio
 from mcp.server import MCPServer
@@ -723,17 +722,16 @@ class _ApiKeyGate:
 def build_http_app():
     """Returns ``(server, asgi_app)``; the host app must run ``server.session_manager.run()`` in its lifespan."""
     settings = get_settings()
-    hosts = {"localhost", "127.0.0.1", "[::1]", settings.host}
-    if settings.public_url:
-        hosts.add(urlparse(settings.public_url).hostname or "")
-    hosts |= set(settings.mcp_allowed_hosts)
-    allowed = sorted({h for h in hosts if h} | {f"{h}:*" for h in hosts if h})
+    # The same names as the rest of the server (localhost, DEMOREEL_HOST, the public URL's host,
+    # DEMOREEL_ALLOWED_HOSTS / DEMOREEL_MCP_ALLOWED_HOSTS); checked unless any name goes (see trusted_hosts).
+    hosts = settings.own_hosts() - {"*"}
+    allowed = sorted(hosts | {f"{h}:*" for h in hosts})
     origins = sorted({f"{scheme}://{h}" for h in allowed for scheme in ("http", "https")})
     server = build_server()
     app = server.streamable_http_app(
         streamable_http_path="/", stateless_http=True, json_response=True,
         transport_security=TransportSecuritySettings(
-            enable_dns_rebinding_protection=settings.host not in {"0.0.0.0", "::"} or bool(settings.mcp_allowed_hosts),
+            enable_dns_rebinding_protection=settings.trusted_hosts() is not None,
             allowed_hosts=allowed, allowed_origins=origins))
     gate = settings.admin_key or settings.api_key  # MCP has write tools: the organiser's key guards it
     return server, (_ApiKeyGate(app, gate) if gate else app)

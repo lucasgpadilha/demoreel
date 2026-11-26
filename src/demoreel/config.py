@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -22,6 +23,14 @@ class Settings(BaseSettings):
         "If set, *changing* anything (POST/PATCH/PUT/DELETE on /api, and all of /mcp) requires this key, while "
         "reading stays open. Use it when the UI is shown to the public, e.g. embedded in a community's site."))
     max_upload_mb: int = 2048
+    allowed_hosts: list[str] = Field(default_factory=list, description=(
+        "Host names this server answers to besides localhost, `host` and the host of `public_url` (a LAN "
+        "address, a second domain…). While no key is set, a request naming any other host is refused: that "
+        "stops a web page from reaching this server through a DNS trick. [\"*\"] accepts any name."))
+    cors_origins: list[str] = Field(default_factory=list, description=(
+        "Other sites whose pages may call this API from the browser, e.g. [\"https://mixdavila.example\"]. "
+        "This server's own names and the `ui.embed.parents` of the brand kits are always allowed; while a key "
+        "is set, any site may also read (GET)."))
 
     workers: int = Field(1, description="Worker processes started by `demoreel serve`.")
     worker_max_file_mb: int = Field(1024, description="Largest file a remote worker may send back (a finished "
@@ -47,7 +56,8 @@ class Settings(BaseSettings):
     offline: bool = Field(False, description="Never download anything (radar images).")
     radar_images_url: str = "https://github.com/pnxenopoulos/awpy-data/releases/latest/download/images.zip"
     mcp_allowed_hosts: list[str] = Field(default_factory=list,
-                                         description="Extra Host headers accepted by the MCP endpoint.")
+                                         description="Extra Host headers accepted by the MCP endpoint (and, "
+                                                     "like allowed_hosts, by the rest of the server).")
     timezone: str | None = Field(None, description="IANA time zone (e.g. America/Sao_Paulo) used to group "
                                                    "matches into nights. Default: this machine's time zone.")
     publish_target: str | None = Field(None, description="Read-only mirror `demoreel publish` copies to, as "
@@ -71,6 +81,39 @@ class Settings(BaseSettings):
         p = self.data_dir.joinpath(*parts)
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
+
+    @property
+    def keyed(self) -> bool:
+        """True when a key guards something here (the whole API, or changing things)."""
+        return bool(self.api_key or self.admin_key)
+
+    def own_hosts(self) -> set[str]:
+        """Host names (lowercase, no port, IPv6 in brackets) this server knows it is reached by."""
+        names = {"localhost", "127.0.0.1", "[::1]", self.host, *self.allowed_hosts, *self.mcp_allowed_hosts}
+        if self.public_url:
+            names.add(urlparse(self.public_url).hostname or "")
+        return {n for n in map(host_name, names) if n}
+
+    def trusted_hosts(self) -> set[str] | None:
+        """Host names requests may name, or None when any name goes: `["*"]` was configured, or the server
+        listens on every interface and was told none of its names (nothing to compare with)."""
+        names = self.own_hosts()
+        if "*" in names:
+            return None
+        told = bool(self.public_url or self.allowed_hosts or self.mcp_allowed_hosts)
+        if host_name(self.host) in {"0.0.0.0", "[::]"} and not told:
+            return None
+        return names
+
+
+def host_name(value: str) -> str:
+    """``Example.org:8000`` -> ``example.org``; ``::1`` and ``[::1]:8000`` -> ``[::1]``."""
+    v = value.strip().lower()
+    if v.startswith("["):
+        return v.split("]", 1)[0] + "]" if "]" in v else v
+    if v.count(":") > 1:  # a bare IPv6 address
+        return f"[{v}]"
+    return v.split(":", 1)[0]
 
 
 @lru_cache(maxsize=1)

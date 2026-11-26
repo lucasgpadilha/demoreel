@@ -20,17 +20,18 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy import select
+from starlette.datastructures import Headers, MutableHeaders
 
 from . import __version__, insights, jobs, service, workers
 from .analysis.schema import KillEvent, MatchAnalysis, PlayerStats, RoundSummary
-from .config import get_settings
+from .config import get_settings, host_name
 from .db import Job, Webhook, init_db, session_scope
 from .schemas import (
     BrandOut,
@@ -731,6 +732,151 @@ def insight_chat(scope: insights.Scope = Depends(_insight_scope)) -> ChatRanking
 
 # ------------------------------------------------------------------------------------------- app
 
+async def _answer(send, status: int, detail: str, headers: list[tuple[bytes, bytes]] | None = None) -> None:
+    """A JSON error straight from a middleware, shaped like FastAPI's (``{"detail": ...}``)."""
+    import json as _json
+
+    body = _json.dumps({"detail": detail}).encode()
+    await send({"type": "http.response.start", "status": status,
+                "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode()),
+                            *(headers or [])]})
+    await send({"type": "http.response.body", "body": body})
+
+
+def _origin_of(url: str) -> str | None:
+    """``https://Example.org/path`` -> ``https://example.org``; None for what is not an http(s) origin."""
+    try:
+        u = urlparse(url.strip())
+    except ValueError:
+        return None
+    if u.scheme not in ("http", "https") or not u.netloc or "@" in u.netloc:
+        return None
+    return f"{u.scheme}://{u.netloc.lower()}"
+
+
+_POLICY_TTL_S = 5.0  # the brand kits are read again after this long
+_policy_cache: dict[str, tuple[Any, float, Any]] = {}
+
+
+def _embed_parents() -> set[str]:
+    """Origins of the sites the brand kits say embed this UI (``ui.embed.parents``)."""
+    from .brand import list_brands, load_brand
+
+    out: set[str] = set()
+    for slug in list_brands():
+        try:
+            kit = load_brand(slug)
+        except Exception:  # noqa: BLE001 - a broken kit must not break every request
+            continue
+        embed = ((kit.ui if kit else None) or {}).get("embed") or {}
+        parents = embed.get("parents") if isinstance(embed, dict) else None
+        out |= {o for o in (_origin_of(x) for x in parents or [] if isinstance(x, str)) if o}
+    return out
+
+
+def _site_origins() -> frozenset[str]:
+    """Other sites whose pages may use this server from the browser: DEMOREEL_CORS_ORIGINS and the kits'
+    embed parents. ``*`` in the setting allows every site."""
+    settings = get_settings()
+    key = (id(settings), tuple(settings.cors_origins), str(settings.data_dir))
+    hit = _policy_cache.get("origins")
+    if hit and hit[0] == key and time.monotonic() - hit[1] < _POLICY_TTL_S:
+        return hit[2]
+    origins = {o for o in map(_origin_of, settings.cors_origins) if o} | _embed_parents()
+    if any(x.strip() == "*" for x in settings.cors_origins):
+        origins.add("*")
+    value = frozenset(origins)
+    _policy_cache["origins"] = (key, time.monotonic(), value)
+    return value
+
+
+def _origin_allowed(origin: str, host: str) -> bool:
+    """May pages of ``origin`` use this server fully (any method, CORS)? Its own pages, pages served by one of
+    its own names (localhost on another port: a development UI), and the sites it lists."""
+    own = _origin_of(origin)
+    if own is None:  # "null" (sandboxed frames, local files) and other schemes
+        return False
+    netloc = own.split("://", 1)[1]
+    if netloc == host.strip().lower() or host_name(netloc) in get_settings().own_hosts():
+        return True
+    sites = _site_origins()
+    return "*" in sites or own in sites
+
+
+_CORS_ALL = b"GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
+_CORS_READ = b"GET, HEAD, OPTIONS"
+
+
+class _BrowserGuard:
+    """What a web page may make a browser do here.
+
+    * While no key is set, a request must name one of this server's hosts. Otherwise a page on evil.example
+      that points its own name at 127.0.0.1 (DNS rebinding) talks to this server as if it were its own site.
+    * A page of another site changes nothing (POST/PUT/PATCH/DELETE with a foreign ``Origin``) and gets CORS
+      answers only when the site is listed (DEMOREEL_CORS_ORIGINS, the kits' ``ui.embed.parents``) - or, to
+      read, while a key is set: then what a visitor can read is public anyway.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        settings = get_settings()
+        headers = Headers(scope=scope)
+        host, method = headers.get("host", ""), scope.get("method", "GET").upper()
+        if not settings.keyed:
+            trusted = settings.trusted_hosts()
+            if trusted is not None and host_name(host) not in trusted:
+                await _answer(send, 421, (
+                    f"This server does not answer to the host name {host_name(host) or '(none)'!r}; it answers to "
+                    f"{', '.join(sorted(trusted))}. Add the name to DEMOREEL_ALLOWED_HOSTS, or set "
+                    "DEMOREEL_PUBLIC_URL to the address people use."))
+                return
+        origin = headers.get("origin")
+        if origin is None:  # not a cross-site browser request: nothing to decide here
+            await self.app(scope, receive, send)
+            return
+        trusted_origin = _origin_allowed(origin, host)
+        if method == "OPTIONS" and "access-control-request-method" in headers:  # CORS preflight
+            wanted = headers["access-control-request-method"].upper()
+            if trusted_origin:
+                allow, methods = origin.encode("latin-1"), _CORS_ALL
+            elif settings.keyed and wanted in ("GET", "HEAD"):
+                allow, methods = b"*", _CORS_READ
+            else:
+                await _answer(send, 403, (
+                    f"Pages of {origin} may not send {wanted} requests here: "
+                    + ("only reading (GET) is open to other sites. " if settings.keyed else
+                       "this server has no key, so it only serves its own pages. ")
+                    + "If that site is yours, add it to DEMOREEL_CORS_ORIGINS."))
+                return
+            asked = headers.get("access-control-request-headers", "").encode("latin-1")
+            await send({"type": "http.response.start", "status": 200, "headers": [
+                (b"access-control-allow-origin", allow), (b"access-control-allow-methods", methods),
+                *([(b"access-control-allow-headers", asked)] if asked else []),
+                (b"access-control-max-age", b"600"), (b"vary", b"Origin"), (b"content-length", b"0")]})
+            await send({"type": "http.response.body", "body": b""})
+            return
+        if method not in _SAFE_METHODS and not trusted_origin:
+            await _answer(send, 403, (
+                f"This server takes no changes from pages of other sites (Origin: {origin}). Use the interface "
+                "it serves; if that site is yours, add it to DEMOREEL_CORS_ORIGINS."))
+            return
+        cors = origin if trusted_origin else ("*" if settings.keyed and method in _SAFE_METHODS else None)
+
+        async def send_with_cors(message):
+            if message["type"] == "http.response.start" and cors:
+                h = MutableHeaders(scope=message)
+                h["access-control-allow-origin"] = cors
+                h.add_vary_header("Origin")
+            await send(message)
+
+        await self.app(scope, receive, send_with_cors)
+
+
 class _GzipApi:
     """Compress JSON answers of the API. Videos and other files are left alone: compressing an mp4 costs CPU
     for nothing and breaks range requests (seeking)."""
@@ -810,7 +956,7 @@ def create_app() -> FastAPI:
                     "is mounted at `/mcp`.",
     )
     app.add_middleware(_GzipApi)
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    app.add_middleware(_BrowserGuard)
     app.add_middleware(_McpNoRedirect)
 
     @app.exception_handler(service.ServiceError)
