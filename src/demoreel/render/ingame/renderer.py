@@ -31,7 +31,15 @@ from pathlib import Path
 from typing import Any
 
 from .. import ffmpeg
-from ..base import Availability, RenderCancelled, RenderError, RenderJob, RenderResult, player_view
+from ..base import (
+    Availability,
+    RecorderBusy,
+    RenderCancelled,
+    RenderError,
+    RenderJob,
+    RenderResult,
+    player_view,
+)
 from . import actions, encode, launcher, plugin, procs, slots, staging, xray
 from .settings import IngameSettings, default_lock_path, hlae_installs
 from .settings import load as load_settings
@@ -178,6 +186,27 @@ class IngameRenderer:
         with self._hold(self._lock_path(), self._install_lock(), wait_s, cancelled, on_wait):
             yield
 
+    def recover_install(self) -> list[str]:
+        """Put the CS2 folder back after a recording that was killed (``demoreel serve`` closed mid-recording,
+        the machine shut down...), when that is safe: nothing records with this CS2 - both recording locks
+        are taken for the moment of the repair - and the game is closed. ``serve``, ``worker`` and ``doctor``
+        call it when they start. Returns what was done, or why it could not be; ``[]`` when there was nothing
+        to do or a recording is in progress. Never raises."""
+        try:
+            settings = self.settings()
+            if settings.cs2_dir is None or not plugin.leftovers(settings):
+                return []
+            with self._hold(settings.lock_path, settings.install_lock_path, 0.0, lambda: False, lambda waited: None):
+                if self._is_cs2_running():
+                    return ["The CS2 folder is still changed by a recording that was interrupted, but CS2 is "
+                            "running, so it was left alone. Close the game: it is put back the next time "
+                            "demoreel serve, worker or doctor starts, or before the next recording."]
+                return plugin.recover_install(settings)
+        except RecorderBusy:
+            return []  # a recording is in progress: what it changed is not a leftover
+        except Exception as exc:  # noqa: BLE001 - reported, never fatal at start-up
+            return [f"Could not put the CS2 folder back after an interrupted recording: {exc}"]
+
     # --- availability ---------------------------------------------------------------------------------
 
     def availability(self) -> Availability:
@@ -260,6 +289,13 @@ class IngameRenderer:
         except Exception:  # noqa: BLE001
             recording = False
         details["recording_in_progress"] = recording
+        left = [] if recording else plugin.leftovers(settings)
+        details["interrupted_recording"] = left
+        if left:
+            problems.insert(0, "The CS2 folder is still changed by a recording that was interrupted ("
+                            + ", ".join(left) + "). Do not start CS2 from Steam until it is put back: demoreel "
+                            "does it by itself, with the game closed, when serve, worker or doctor starts and "
+                            "before the next recording.")
         cs2 = self._is_cs2_running()
         details["cs2_running"] = cs2
         if cs2 and not recording:
@@ -317,8 +353,10 @@ class IngameRenderer:
         shared = self._shared_install(settings)
         if shared:
             raise RenderError(shared)
-        if plugin.recover_gameinfo(settings.gameinfo_path) == "restored":
-            warnings.append("gameinfo.gi was still patched from a previous run that crashed; it was restored.")
+        restored = plugin.recover_install(settings)
+        if restored:
+            warnings.append("A previous run was interrupted and had left the CS2 folder changed; put back: "
+                            + "; ".join(restored) + ".")
 
         cs2_patch = plugin.read_cs2_patch_version(settings)
         binary = plugin.select_plugin_binary(settings.plugin_dir, settings.platform, cs2_patch,
@@ -371,7 +409,6 @@ class IngameRenderer:
             recording_system=backend, max_tick=max_tick,
             frame_format=frame_format, hlae_output_dir=hlae_dir.as_posix(),
             hlae_ffmpeg_args=self._hlae_encoder(extra, settings))
-        names = [seq.name for seq in plan.sequences]  # final-video order
         # One game launch per batch: a take that plays past the end of the match must be the last of its launch.
         rounds = getattr(job.analysis, "rounds", None) or []
         batches = actions.recording_batches(plan.sequences, int(rounds[-1].end_tick) if rounds else None)
@@ -394,91 +431,108 @@ class IngameRenderer:
         # 2. Files the game reads ------------------------------------------------------------------------
         staged = staging.stage_demo(job.demo_path, job.work_dir)
         keep_raw = _flag(extra, "ingame_keep_raw", False)
-        game: launcher.GameRun | None = None  # the last launch
-        game_seconds = 0.0  # all launches
-        installed: plugin.InstalledPlugin | None = None
         try:
-            encode.cleanup_raw(settings, names)  # stale frames of an aborted run would end up in the video
-            settings.cfg_dir.mkdir(parents=True, exist_ok=True)
-            game_args = launcher.build_launch_args(staged.path, width, height,
-                                                   _string_list(extra.get("ingame_launch_args")))
-            if hlae:
-                command = launcher.build_hlae_command(settings, game_args)
-                launcher.register_hlae_ffmpeg(settings.hlae_exe, ffmpeg.ffmpeg_path())  # type: ignore[arg-type]
-                shutil.rmtree(hlae_dir, ignore_errors=True)
-                hlae_dir.mkdir(parents=True, exist_ok=True)
-            else:
-                command = launcher.build_command(settings, game_args)
-
-            startup_timeout_s = _number(extra, "ingame_startup_timeout_s", 300.0)
-            stall_timeout_s = _number(extra, "ingame_stall_timeout_s", 300.0)
-
-            # 3. Record ----------------------------------------------------------------------------------
-            recorded = 0
-            for number, batch in enumerate(batches, start=1):
-                if job.cancelled():
-                    raise RenderCancelled("Render cancelled.")
-                staged.write_actions(actions.to_json(actions.build_actions(batch, action_options)))
-                recorded += len(batch)
-                batch_seconds = actions.expected_frames(batch, fps, tickrate) / float(fps)
-                timeout_s = settings.timeout_s or (240.0 + 90.0 * len(batch) + 12.0 * batch_seconds)
-                if hlae:
-                    on_poll = self._hlae_poller(job, hlae_dir, len(plan.sequences), startup_timeout_s,
-                                                stall_timeout_s, done_at=recorded)
-                else:
-                    on_poll = self._progress_poller(
-                        job, settings, expected, startup_timeout_s, stall_timeout_s, last_name=batch[-1].name,
-                        last_expected=actions.expected_frames([batch[-1]], fps, tickrate))
-                if number == 1:
-                    job.progress(0.05, "Starting CS2")
-                run: launcher.GameRun | None = None
-                with plugin.plugin_session(settings, binary) as installed:
-                    try:
-                        run = (self._run_loader if hlae else self._run_game)(
-                            command, env=launcher.build_env(settings, installed.env), timeout_s=timeout_s,
-                            cancelled=job.cancelled, on_poll=on_poll, log_path=job.work_dir / "cs2-output.log",
-                            kill_names=procs.CS2_PROCESS_NAMES)
-                    except _GameDidNotQuit as exc:
-                        warnings.append(str(exc))
-                    # gameinfo.gi and the plugin's settings file are restored and the plugin removed when this
-                    # block ends: let the game go first (the plugin writes its settings once more on shutdown).
-                    wait_until_gone(self._is_cs2_running)
-                if run is not None and run.returncode != 0 and run.duration_s < 2.0:
-                    raise RenderError(f"CS2 failed to start (exit code {run.returncode}). {run.output_tail[-600:]}")
-                if run is not None:
-                    game_seconds += run.duration_s
-                    game = run
-
-            # 4. Encode ----------------------------------------------------------------------------------
-            has_layer = installed is not None and installed.vulkan_layer_installed
-            swap = _flag(extra, "ingame_swap_red_blue", settings.is_linux and not has_layer)
-            try:
-                if hlae:
-                    encoded = encode.mux_hlae_takes(
-                        hlae_dir, names, job.work_dir / "takes", width=width, height=height, fps=fps,
-                        crf=options.crf, cancelled=job.cancelled,
-                        progress=lambda done, total: job.progress(
-                            0.70 + 0.25 * done / max(1, total), f"Joining take {min(done + 1, total)}/{total}"))
-                else:
-                    encoded = encode.encode_takes(
-                        settings, names, job.work_dir / "takes", width=width, height=height, fps=fps,
-                        crf=options.crf, swap_red_blue=swap, cancelled=job.cancelled,
-                        progress=lambda done, total: job.progress(
-                            0.70 + 0.25 * done / max(1, total), f"Encoding take {min(done + 1, total)}/{total}"))
-            except RenderCancelled:
-                raise
-            except RenderError as exc:
-                raise RenderError(self._with_diagnostics(str(exc), settings, game)) from exc
-            warnings.extend(encoded.warnings)
-            job.progress(0.96, "Joining takes")
-            warnings.extend(encode.finalize(encoded.parts, job.out_path, job.thumbnail_path, encoded.duration_s))
-            plugin.delete_plugin_logs(settings)  # only kept after a failure, where the error message quotes it
+            # The journal goes into the CS2 folder before anything else there changes: if demoreel is killed
+            # from here on, whoever starts next puts the folder back (plugin.recover_install).
+            with plugin.recording_session(settings, keep_raw=keep_raw) as scope:
+                return self._record_and_encode(
+                    job, settings, staged=staged, scope=scope, backend=backend, binary=binary, plan=plan,
+                    batches=batches, action_options=action_options, warnings=warnings, hlae_dir=hlae_dir,
+                    cs2_patch=cs2_patch, expected=expected)
         finally:
             staged.cleanup()
             if not keep_raw:
                 shutil.rmtree(hlae_dir, ignore_errors=True)
-                encode.cleanup_raw(settings, names)
-                plugin.remove_game_generated(settings)  # the folder can only go once the raw frames are gone
+
+    def _record_and_encode(self, job: RenderJob, settings: IngameSettings, *, staged: staging.StagedDemo,
+                           scope: encode.RawScope, backend: str, binary: plugin.PluginBinary, plan: actions.Plan,
+                           batches: list[list[actions.RecordSequence]], action_options: actions.ActionOptions,
+                           warnings: list[str], hlae_dir: Path, cs2_patch: int | None,
+                           expected: int) -> RenderResult:
+        """Steps 3 and 4 of a render - every game launch, then the encoding - inside the recording journal."""
+        options = job.options
+        extra = options.extra or {}
+        hlae = backend == "hlae"
+        width, height, fps = encode.even(options.width), encode.even(options.height), max(1, int(options.fps))
+        tickrate = action_options.tickrate
+        names = [seq.name for seq in plan.sequences]  # final-video order
+        game: launcher.GameRun | None = None  # the last launch
+        game_seconds = 0.0  # all launches
+        has_layer = False  # the Vulkan layer of the plugin (Linux), as installed for the last launch
+
+        settings.cfg_dir.mkdir(parents=True, exist_ok=True)
+        game_args = launcher.build_launch_args(staged.path, width, height,
+                                               _string_list(extra.get("ingame_launch_args")))
+        if hlae:
+            command = launcher.build_hlae_command(settings, game_args)
+            launcher.register_hlae_ffmpeg(settings.hlae_exe, ffmpeg.ffmpeg_path())  # type: ignore[arg-type]
+            shutil.rmtree(hlae_dir, ignore_errors=True)
+            hlae_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            command = launcher.build_command(settings, game_args)
+
+        startup_timeout_s = _number(extra, "ingame_startup_timeout_s", 300.0)
+        stall_timeout_s = _number(extra, "ingame_stall_timeout_s", 300.0)
+
+        # 3. Record ----------------------------------------------------------------------------------------
+        recorded = 0
+        for number, batch in enumerate(batches, start=1):
+            if job.cancelled():
+                raise RenderCancelled("Render cancelled.")
+            staged.write_actions(actions.to_json(actions.build_actions(batch, action_options)))
+            recorded += len(batch)
+            batch_seconds = actions.expected_frames(batch, fps, tickrate) / float(fps)
+            timeout_s = settings.timeout_s or (240.0 + 90.0 * len(batch) + 12.0 * batch_seconds)
+            if hlae:
+                on_poll = self._hlae_poller(job, hlae_dir, len(plan.sequences), startup_timeout_s,
+                                            stall_timeout_s, done_at=recorded)
+            else:
+                on_poll = self._progress_poller(
+                    job, settings, expected, startup_timeout_s, stall_timeout_s, last_name=batch[-1].name,
+                    last_expected=actions.expected_frames([batch[-1]], fps, tickrate), scope=scope)
+            if number == 1:
+                job.progress(0.05, "Starting CS2")
+            run: launcher.GameRun | None = None
+            with plugin.plugin_session(settings, binary) as installed:
+                try:
+                    run = (self._run_loader if hlae else self._run_game)(
+                        command, env=launcher.build_env(settings, installed.env), timeout_s=timeout_s,
+                        cancelled=job.cancelled, on_poll=on_poll, log_path=job.work_dir / "cs2-output.log",
+                        kill_names=procs.CS2_PROCESS_NAMES)
+                except _GameDidNotQuit as exc:
+                    warnings.append(str(exc))
+                # gameinfo.gi and the plugin's settings file are restored and the plugin removed when this
+                # block ends: let the game go first (the plugin writes its settings once more on shutdown).
+                wait_until_gone(self._is_cs2_running)
+                has_layer = installed.vulkan_layer_installed
+            if run is not None and run.returncode != 0 and run.duration_s < 2.0:
+                raise RenderError(f"CS2 failed to start (exit code {run.returncode}). {run.output_tail[-600:]}")
+            if run is not None:
+                game_seconds += run.duration_s
+                game = run
+
+        # 4. Encode ----------------------------------------------------------------------------------------
+        swap =_flag(extra, "ingame_swap_red_blue", settings.is_linux and not has_layer)
+        try:
+            if hlae:
+                encoded = encode.mux_hlae_takes(
+                    hlae_dir, names, job.work_dir / "takes", width=width, height=height, fps=fps,
+                    crf=options.crf, cancelled=job.cancelled,
+                    progress=lambda done, total: job.progress(
+                        0.70 + 0.25 * done / max(1, total), f"Joining take {min(done + 1, total)}/{total}"))
+            else:
+                encoded = encode.encode_takes(
+                    settings, names, job.work_dir / "takes", width=width, height=height, fps=fps,
+                    crf=options.crf, swap_red_blue=swap, cancelled=job.cancelled, scope=scope,
+                    progress=lambda done, total: job.progress(
+                        0.70 + 0.25 * done / max(1, total), f"Encoding take {min(done + 1, total)}/{total}"))
+        except RenderCancelled:
+            raise
+        except RenderError as exc:
+            raise RenderError(self._with_diagnostics(str(exc), settings, game)) from exc
+        warnings.extend(encoded.warnings)
+        job.progress(0.96, "Joining takes")
+        warnings.extend(encode.finalize(encoded.parts, job.out_path, job.thumbnail_path, encoded.duration_s))
 
         job.progress(1.0, "Done")
         return RenderResult(
@@ -550,7 +604,7 @@ class IngameRenderer:
 
     def _progress_poller(self, job: RenderJob, settings: IngameSettings, expected: int,
                          startup_timeout_s: float, stall_timeout_s: float, *, last_name: str,
-                         last_expected: int) -> Callable[[float], None]:
+                         last_expected: int, scope: encode.RawScope = encode.RawScope()) -> Callable[[float], None]:
         """Progress + stall detection from the number of frames on disk, checked every ~2 s.
 
         ``last_name`` is the take recorded last: once (nearly) all of its frames exist and nothing new shows up
@@ -564,7 +618,7 @@ class IngameRenderer:
             if elapsed - state["checked_at"] < 2.0:
                 return
             state["checked_at"] = elapsed
-            frame_names = encode.frame_names(settings)
+            frame_names = encode.frame_names(settings, scope)
             frames = len(frame_names)
             if frames != state["frames"]:
                 state["frames"], state["changed_at"] = frames, elapsed

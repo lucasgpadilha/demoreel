@@ -241,6 +241,168 @@ def popen_group_kwargs() -> dict:
     return {"start_new_session": True}
 
 
+# --- the game dies with demoreel ------------------------------------------------------------------------------
+
+class Containment:
+    """How a started process is tied to demoreel. The default ties nothing; :class:`DieWithParent` makes the
+    game die with the process that started it. Injected into ``launcher.run_game`` so tests can watch it."""
+
+    def popen_kwargs(self, base: dict) -> dict:
+        """``base`` (the ``Popen`` keyword arguments) with whatever this containment needs added."""
+        return base
+
+    def started(self, proc: subprocess.Popen) -> None:
+        """Called right after ``Popen``, before anything else happens to the process."""
+
+    def kill(self) -> None:
+        """End every process that is contained (the game and whatever it started)."""
+
+    def close(self) -> None:
+        """The session is over; let go of what was held."""
+
+
+_CREATE_SUSPENDED = 0x00000004
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_PROCESS_TERMINATE, _PROCESS_SET_QUOTA, _PROCESS_SUSPEND_RESUME = 0x0001, 0x0100, 0x0800
+_PR_SET_PDEATHSIG = 1
+
+
+def _windows_job() -> tuple:
+    """``(kernel32, ntdll, job handle)``: a Job Object whose processes are all killed when its last handle is
+    closed. Only this process holds the handle, and Windows closes it when this process ends - however it
+    ends: Ctrl+C, the console window closed, TerminateProcess, a crash."""
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_longlong), ("PerJobUserTimeLimit", ctypes.c_longlong),
+                    ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_ulonglong) for name in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount", "ReadTransferCount",
+            "WriteTransferCount", "OtherTransferCount")]
+
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", BasicLimits), ("IoInfo", IoCounters),
+                    ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    ntdll = ctypes.WinDLL("ntdll")  # type: ignore[attr-defined]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+    ntdll.NtResumeProcess.restype = ctypes.c_long
+
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise OSError(ctypes.get_last_error(), "CreateJobObject failed")
+    info = ExtendedLimits()
+    # BREAKAWAY_OK: a child that explicitly asks to leave the job may (instead of failing to start). HLAE's
+    # loader is not known to ask; if it did, the game would simply not be contained, as before.
+    info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | _JOB_OBJECT_LIMIT_BREAKAWAY_OK
+    if not kernel32.SetInformationJobObject(job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(info),
+                                            ctypes.sizeof(info)):
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(job)
+        raise OSError(error, "SetInformationJobObject failed")
+    return kernel32, ntdll, job
+
+
+class DieWithParent(Containment):
+    """The game - and on Windows whatever it starts - dies with the demoreel process that started it, so a
+    worker that is killed never leaves CS2 recording on its own.
+
+    * Windows: the process is created suspended, put in a Job Object with ``KILL_ON_JOB_CLOSE``, then resumed
+      (so nothing it starts can escape the job before it is in it). Processes it starts are in the job too.
+    * Linux: ``PR_SET_PDEATHSIG`` = ``SIGKILL`` in the child before it runs the command. It reaches the direct
+      child (the Steam runtime's entry point); what that one starts inside its container is up to it.
+
+    Anything that goes wrong here is logged and the process runs uncontained, as it always did: containment
+    must never be the reason a recording does not start."""
+
+    def __init__(self, platform: str = sys.platform) -> None:
+        self.platform = platform
+        self._job = None
+        self._kernel32 = self._ntdll = None
+        self._suspended = False
+
+    def popen_kwargs(self, base: dict) -> dict:
+        out = dict(base)
+        if self.platform == "win32":
+            try:
+                self._kernel32, self._ntdll, self._job = _windows_job()
+            except Exception as exc:  # noqa: BLE001
+                _log_containment(f"no Job Object ({exc})")
+                return out
+            out["creationflags"] = out.get("creationflags", 0) | _CREATE_SUSPENDED
+            self._suspended = True
+        elif self.platform.startswith("linux"):
+            try:
+                import ctypes
+
+                prctl = ctypes.CDLL(None, use_errno=True).prctl  # looked up here, not in the child
+                parent = os.getpid()
+
+                def die_with_parent() -> None:  # runs in the child, between fork and exec: keep it tiny
+                    prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
+                    if os.getppid() != parent:  # the parent died before the line above: do not start at all
+                        os._exit(1)
+
+                out["preexec_fn"] = die_with_parent
+            except Exception as exc:  # noqa: BLE001 - no libc prctl (not glibc/musl?)
+                _log_containment(f"no PR_SET_PDEATHSIG ({exc})")
+        return out
+
+    def started(self, proc: subprocess.Popen) -> None:
+        if self.platform != "win32" or not self._suspended:
+            return
+        import ctypes
+
+        k32, ntdll = self._kernel32, self._ntdll
+        handle = k32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE | _PROCESS_SUSPEND_RESUME, False, proc.pid)
+        if not handle:
+            error = ctypes.get_last_error()
+            proc.kill()  # created suspended and cannot be resumed: it would hang there forever
+            raise OSError(error, f"cannot open the process it just started (pid {proc.pid})")
+        try:
+            if self._job and not k32.AssignProcessToJobObject(self._job, handle):
+                _log_containment(f"AssignProcessToJobObject failed ({ctypes.get_last_error()})")
+            status = ntdll.NtResumeProcess(handle)
+            if status != 0:
+                proc.kill()
+                raise OSError(status, f"cannot resume the process it just started (NTSTATUS {status:#x})")
+        finally:
+            k32.CloseHandle(handle)
+
+    def kill(self) -> None:
+        if self._job and self._kernel32 is not None:
+            self._kernel32.TerminateJobObject(self._job, 1)
+
+    def close(self) -> None:
+        job, self._job = self._job, None
+        if job and self._kernel32 is not None:
+            self._kernel32.CloseHandle(job)  # kills what is still in the job (nothing, after a normal end)
+
+
+def _log_containment(what: str) -> None:
+    import logging
+
+    logging.getLogger("demoreel.ingame").warning("The game will not be closed if demoreel dies: %s", what)
+
+
 def _kill_pid(pid: int) -> None:
     if sys.platform == "win32":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=30,

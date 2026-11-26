@@ -26,17 +26,22 @@ overrides.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..base import RenderError
+from . import encode
+from .encode import RawScope
 from .settings import IngameSettings
+
+log = logging.getLogger("demoreel.ingame")
 
 CSDM_REPO_URL = "https://github.com/akiver/cs-demo-manager"
 CSDM_STATIC_DIR = "static/cs2"
@@ -544,13 +549,50 @@ def vulkan_layer_env(settings: IngameSettings, base_env: Mapping[str, str]) -> d
     }
 
 
+# Folders of the plugin folder that CS Demo Manager installs too (it leaves its copy in place between uses).
+# Someone else's is set aside, whole, while demoreel's is there, and put back afterwards.
+OWN_FOLDERS = ("bin", "vulkan")
+
+
+def _aside(path: Path) -> Path:
+    return path.with_name(path.name + BACKUP_SUFFIX)
+
+
+def _remove(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _set_aside(path: Path) -> bool:
+    """Rename someone else's ``path`` to ``<name>.demoreel-backup`` (same folder: one atomic rename)."""
+    if not path.exists() or _aside(path).exists():
+        return False
+    os.replace(path, _aside(path))
+    return True
+
+
+def _put_back(path: Path) -> bool:
+    """Undo :func:`_set_aside`, replacing whatever is at ``path`` now (ours)."""
+    backup = _aside(path)
+    if not backup.exists():
+        return False
+    _remove(path)
+    os.replace(backup, path)
+    return True
+
+
 def install_plugin(settings: IngameSettings, binary: PluginBinary,
                    base_env: Mapping[str, str] | None = None) -> InstalledPlugin:
     """Copy the user's plugin binary into ``game/csgo/csdm/bin`` (port of ``installCs2ServerPlugin``, minus
-    the ``gameinfo.gi`` edit which :func:`patched_gameinfo` owns)."""
+    the ``gameinfo.gi`` edit which :func:`patched_gameinfo` owns). A ``bin`` / ``vulkan`` folder that is already
+    there (CS Demo Manager's) is set aside, and put back by :func:`uninstall_plugin`."""
     installed = InstalledPlugin(binary=binary)
     try:
         delete_plugin_logs(settings)
+        for name in OWN_FOLDERS:
+            _set_aside(settings.plugin_install_dir / name)
         bin_dir = plugin_bin_dir(settings)
         bin_dir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(binary.path, bin_dir / installed_binary_name(settings.platform))
@@ -571,17 +613,20 @@ GAME_GENERATED_NAMES = ("ServerConfig.vdf", "_iconcache")
 
 def remove_game_generated(settings: IngameSettings) -> None:
     """Delete what the game wrote into the plugin folder, then the folder itself once it is empty, so the CS2
-    install ends up exactly as it was found. Safe to call repeatedly."""
+    install ends up exactly as it was found. What was there before the recording (CS Demo Manager's own
+    session, per the journal) is kept. Safe to call repeatedly."""
     root = settings.plugin_install_dir
+    journal = read_journal(settings)
+    before = set(journal.get("csdm_entries") or ()) if journal else set()
     for name in GAME_GENERATED_NAMES:
-        path = root / name
+        if name in before:
+            continue
         try:
-            if path.is_dir():
-                shutil.rmtree(path, ignore_errors=True)
-            else:
-                path.unlink(missing_ok=True)
+            _remove(root / name)
         except OSError:
             pass
+    if journal is not None and journal.get("csdm_root"):
+        return  # the folder was there before: it stays, even empty
     try:
         root.rmdir()
     except OSError:
@@ -589,11 +634,16 @@ def remove_game_generated(settings: IngameSettings) -> None:
 
 
 def uninstall_plugin(settings: IngameSettings) -> None:
-    """Remove the binaries copied by :func:`install_plugin` and the files the game generated next to them. The
-    ``movie`` folder (raw frames) is left to the encoder's cleanup; the plugin folder is removed once empty."""
+    """Remove the binaries copied by :func:`install_plugin` and the files the game generated next to them, and
+    put back the folders that were set aside. The ``movie`` folder (raw frames) is left to the encoder's
+    cleanup; the plugin folder is removed once empty."""
     root = settings.plugin_install_dir
-    shutil.rmtree(root / "bin", ignore_errors=True)
-    shutil.rmtree(root / "vulkan", ignore_errors=True)
+    for name in OWN_FOLDERS:
+        try:
+            if not _put_back(root / name):
+                shutil.rmtree(root / name, ignore_errors=True)
+        except OSError as exc:  # theirs stays aside, whole: the next start puts it back
+            log.warning("Could not put %s back yet: %s", root / name, exc)
     remove_game_generated(settings)
 
 
@@ -610,3 +660,172 @@ def plugin_session(settings: IngameSettings, binary: PluginBinary,
             yield installed
     finally:
         uninstall_plugin(settings)
+
+
+# --- one recording, from before the first launch to after the last cleanup -----------------------------------
+
+# Written into the CS2 folder before anything there changes and deleted once all is back as it was, so a
+# recording that was killed (demoreel closed, the machine shut down) can be undone by whoever starts next.
+JOURNAL_NAME = "demoreel-session.json"
+LAST_LOG_NAME = "last-csdm.log"
+
+
+def journal_path(settings: IngameSettings) -> Path:
+    return settings.csgo_dir / JOURNAL_NAME
+
+
+def read_journal(settings: IngameSettings) -> dict | None:
+    try:
+        data = json.loads(journal_path(settings).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return {}  # there, but unreadable: still a recording that did not finish
+
+
+def _plugin_log(settings: IngameSettings) -> Path:
+    return settings.bin_dir / "csdm.log"
+
+
+def _keep_our_log(settings: IngameSettings, failed: bool) -> None:
+    """After a failure our ``csdm.log`` is what explains it: it moves to ``<data_dir>/ingame/last-csdm.log``
+    (outside the game). After a success it is deleted. Someone else's log, set aside, comes back."""
+    ours = _plugin_log(settings)
+    try:
+        if failed and ours.is_file():
+            settings.data_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ours, settings.data_dir / LAST_LOG_NAME)
+        if not _put_back(ours):
+            ours.unlink(missing_ok=True)
+        (settings.bin_dir / "csdm-vulkan.log").unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("Could not tidy up %s: %s", ours, exc)
+
+
+def _ours_left(settings: IngameSettings, before: Iterable[str]) -> list[Path]:
+    """What of a recording is still in the CS2 folder after its cleanup (a file the game kept locked).
+    ``before``: the entries of the plugin folder before the recording - a ``bin`` that was there is theirs."""
+    root = settings.plugin_install_dir
+    candidates = [backup_path(settings.gameinfo_path), backup_path(plugin_settings_path(settings)),
+                  _aside(_plugin_log(settings)), *(_aside(root / name) for name in OWN_FOLDERS),
+                  *(root / name for name in OWN_FOLDERS if name not in set(before))]
+    return [p for p in candidates if p.exists()]
+
+
+@contextmanager
+def recording_session(settings: IngameSettings, *, keep_raw: bool = False) -> Iterator[RawScope]:
+    """The journal around one recording (every game launch of it and the encoding). Yields the
+    :class:`~.encode.RawScope` that tells this recording's raw files from what was there before.
+
+    On the way out the raw files are deleted (unless ``keep_raw``), what the game generated in the plugin
+    folder goes, the plugin's log is handled by :func:`_keep_our_log` and the journal is deleted - kept only
+    when something of ours could not be removed, so that the next start finishes the job."""
+    root = settings.plugin_install_dir
+    try:
+        csdm_root = root.is_dir()
+        entries = sorted(p.name for p in root.iterdir()) if csdm_root else []
+    except OSError:
+        csdm_root, entries = True, []
+    scope = encode.snapshot_raw(settings)
+    log_aside = False
+    try:
+        log_aside = _set_aside(_plugin_log(settings))  # CS Demo Manager's last log; ours goes in its place
+        _write_bytes(journal_path(settings), json.dumps({
+            "pid": os.getpid(), "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "csdm_root": csdm_root,
+            "csdm_entries": entries, "raw": scope.to_dict(), "log_aside": log_aside}, indent=1).encode("utf-8"))
+    except OSError as exc:
+        if log_aside:
+            _put_back(_plugin_log(settings))
+        raise RenderError(f"Cannot write into the CS2 folder ({settings.csgo_dir}): {exc}. Is it writable?") from exc
+    failed = True
+    try:
+        yield scope
+        failed = False
+    finally:
+        if not keep_raw:
+            encode.cleanup_raw(settings, (), scope)
+        _keep_our_log(settings, failed)
+        remove_game_generated(settings)
+        left = _ours_left(settings, entries)
+        if left:
+            log.warning("Still in the CS2 folder after recording (removed the next time demoreel starts): %s",
+                        ", ".join(map(str, left)))
+        else:
+            try:
+                journal_path(settings).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+# --- after a recording that was killed ----------------------------------------------------------------------
+
+
+def leftovers(settings: IngameSettings) -> list[str]:
+    """What an interrupted recording left changed in the CS2 folder, for a person to read; empty when the
+    folder is as demoreel found it. Only meaningful while nothing records. Never raises."""
+    if settings.cs2_dir is None:
+        return []
+    out: list[str] = []
+    try:
+        root = settings.plugin_install_dir
+        journal = read_journal(settings)
+        if backup_path(settings.gameinfo_path).is_file():
+            out.append("gameinfo.gi (still loading the recording plugin)")
+        if backup_path(plugin_settings_path(settings)).is_file():
+            out.append("the plugin's csdm_settings.json")
+        if any(_aside(root / name).exists() for name in OWN_FOLDERS):
+            out.append("CS Demo Manager's csdm/bin, set aside")
+        elif journal is not None and "bin" not in (journal.get("csdm_entries") or ()) and (root / "bin").exists():
+            out.append("the recording plugin in csdm/bin")
+        if _aside(_plugin_log(settings)).exists():
+            out.append("CS Demo Manager's csdm.log, set aside")
+        if journal is not None and encode.frame_names(settings, encode.RawScope.from_dict(journal.get("raw"))):
+            out.append("raw frames in csdm/movie")
+        if journal is not None and not out:
+            out.append(f"the recording journal {JOURNAL_NAME}")
+    except Exception:  # noqa: BLE001 - informational
+        pass
+    return out
+
+
+def recover_install(settings: IngameSettings) -> list[str]:
+    """Put the CS2 folder back as it was before a recording that was killed halfway: ``gameinfo.gi``, the
+    plugin's ``csdm_settings.json``, the plugin files (and CS Demo Manager's, set aside), that recording's raw
+    frames and sound, its log. Returns what was done, for a person to read; ``[]`` when there was nothing.
+
+    Call it only while nothing records with this CS2 (both recording locks free) and the game is closed: it
+    would otherwise undo a recording in progress. A broken ``gameinfo.gi`` without a usable backup is left as
+    it is and reported (Steam's "verify integrity of game files" repairs it)."""
+    if settings.cs2_dir is None or not settings.gameinfo_path.parent.is_dir():
+        return []
+    done: list[str] = []
+    journal = read_journal(settings)
+    state = recover_gameinfo(settings.gameinfo_path)
+    if state == "restored":
+        done.append("gameinfo.gi restored")
+    elif state == "damaged":
+        done.append("gameinfo.gi is damaged and its backup unusable: verify the game files in Steam")
+    if recover_plugin_settings(plugin_settings_path(settings)) == "restored":
+        done.append("csdm_settings.json restored")
+    root = settings.plugin_install_dir
+    before = set((journal or {}).get("csdm_entries") or ())
+    for name in OWN_FOLDERS:
+        if _put_back(root / name):
+            done.append(f"CS Demo Manager's csdm/{name} put back")
+        elif journal is not None and name not in before and (root / name).exists():
+            shutil.rmtree(root / name, ignore_errors=True)
+            done.append(f"recording plugin removed from csdm/{name}")
+    if journal is not None:
+        before = encode.frame_names(settings, encode.RawScope.from_dict(journal.get("raw")))
+        encode.cleanup_raw(settings, (), encode.RawScope.from_dict(journal.get("raw")))
+        if before:
+            done.append(f"{len(before)} raw frames deleted")
+        _keep_our_log(settings, failed=True)
+        remove_game_generated(settings)
+        journal_path(settings).unlink(missing_ok=True)
+        if not done:
+            done.append("recording journal closed")
+    elif _put_back(_plugin_log(settings)):
+        done.append("CS Demo Manager's csdm.log put back")
+    return done

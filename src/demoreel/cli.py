@@ -59,18 +59,56 @@ def serve(
 
     init_db()
     requeue_stale()
+    _recover_ingame()
     n = settings.workers if workers is None else workers
+    context = multiprocessing.get_context("spawn")
+    stop = context.Event()
     procs = []
     for _ in range(max(0, n)):
-        p = multiprocessing.get_context("spawn").Process(target=worker_process_main, args=(_capabilities(),), daemon=True)
+        p = context.Process(target=worker_process_main, args=(_capabilities(), stop), daemon=True)
         p.start()
         procs.append(p)
     typer.echo(f"demoreel  ->  {settings.base_url}   (docs: /docs · MCP: /mcp · workers: {len(procs)})")
     try:
         uvicorn.run("demoreel.api:create_app", factory=True, host=settings.host, port=settings.port, log_level="info")
     finally:
-        for p in procs:
-            p.terminate()
+        stop_workers(procs, stop)
+
+
+# How long `serve` lets its workers finish when it stops: a recording is cancelled at its next check (about a
+# second), closes the game - up to 15 s - and puts the CS2 folder back before the worker exits.
+WORKER_STOP_S = 30.0
+
+
+def stop_workers(procs: list, stop, timeout_s: float = WORKER_STOP_S) -> list:
+    """Ask the worker processes to stop, give them ``timeout_s`` in all to clean up, then end the ones still
+    there. Returns those that had to be terminated."""
+    import time
+
+    stop.set()
+    deadline = time.monotonic() + timeout_s
+    for p in procs:
+        p.join(timeout=max(0.0, deadline - time.monotonic()))
+    late = [p for p in procs if p.is_alive()]
+    for p in late:
+        logging.getLogger("demoreel").warning("worker %s did not stop within %.0f s; terminating it", p.pid,
+                                              timeout_s)
+        p.terminate()
+    return late
+
+
+def _recover_ingame() -> None:
+    """Put the CS2 folder back if a recording was killed halfway - demoreel stopped mid-recording, the machine
+    shut down - so nobody starts the game from Steam with it changed. Safe at any time: it does nothing while a
+    recording runs or CS2 is open. Prints what it did; never raises."""
+    try:
+        from .render import get_renderer
+
+        done = getattr(get_renderer("ingame"), "recover_install", lambda: [])()
+    except Exception as exc:  # noqa: BLE001 - must never keep demoreel from starting
+        done = [f"Could not check the CS2 folder for an interrupted recording: {exc}"]
+    for line in done:
+        typer.echo(f"ingame        {line}")
 
 
 @app.command()
@@ -81,6 +119,7 @@ def worker(
     """Run a standalone worker (use it to scale out, or on a gaming PC for in-game recording)."""
     from .jobs import worker_process_main
 
+    _recover_ingame()
     worker_process_main(_capabilities(capability))
 
 
@@ -301,6 +340,7 @@ def doctor() -> None:
     typer.echo(f"data dir      {s.data_dir.resolve()}")
     typer.echo(f"database      {s.db_url}")
     typer.echo(f"default       renderer={s.default_renderer} auto_render_top={s.auto_render_top} ingame_enabled={s.ingame_enabled}")
+    _recover_ingame()  # before the check, which would otherwise report what is about to be put back
     for r in describe_renderers():
         mark = "OK " if r["available"] else "NO "
         typer.echo(f"renderer      {mark}{r['name']:7} {r['reason'] or json.dumps(r['details'], default=str)}")

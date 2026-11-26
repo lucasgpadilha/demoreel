@@ -267,27 +267,43 @@ def _tail(path: Path | None, max_chars: int = 2000) -> str:
         return ""
 
 
+def _start(command: Sequence[str], env: Mapping[str, str] | None, cwd: Path | None, log_handle,
+           container: procs.Containment) -> subprocess.Popen:
+    """``Popen`` with the process group of :func:`procs.popen_group_kwargs` and ``container``'s additions; the
+    container sees the process before anything else happens to it."""
+    proc = subprocess.Popen(
+        list(command), env=dict(env) if env is not None else None, cwd=str(cwd) if cwd else None,
+        stdin=subprocess.DEVNULL, stdout=log_handle or subprocess.DEVNULL, stderr=subprocess.STDOUT,
+        **container.popen_kwargs(procs.popen_group_kwargs()))
+    try:
+        container.started(proc)
+    except OSError:
+        procs.kill_process_tree(proc)
+        raise
+    return proc
+
+
 def run_game(command: Sequence[str], *, env: Mapping[str, str] | None = None, cwd: Path | None = None,
              timeout_s: float, cancelled: Callable[[], bool] = lambda: False,
              on_poll: Callable[[float], None] = lambda elapsed: None, log_path: Path | None = None,
-             poll_s: float = 0.5, kill_names: Sequence[str] = ()) -> GameRun:
+             poll_s: float = 0.5, kill_names: Sequence[str] = (),
+             contain: Callable[[], procs.Containment] = procs.DieWithParent) -> GameRun:
     """Start ``command`` and wait for it to exit.
 
     * ``on_poll(elapsed_s)`` is called every ``poll_s``; it reports progress and may raise ``RenderError`` to
       abort (stall detection). Any exception kills the process tree before propagating.
     * ``cancelled()`` returning true kills the tree and raises :class:`RenderCancelled`.
     * after ``timeout_s`` the watchdog kills the tree and raises :class:`RenderError`.
+    * ``contain()`` ties the process to this one (:class:`procs.DieWithParent`: the game dies with demoreel).
     """
     log_handle = None
+    container = contain()
     try:
         if log_path is not None:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_handle = open(log_path, "wb")  # noqa: SIM115 - closed in the finally below
         try:
-            proc = subprocess.Popen(
-                list(command), env=dict(env) if env is not None else None, cwd=str(cwd) if cwd else None,
-                stdin=subprocess.DEVNULL, stdout=log_handle or subprocess.DEVNULL, stderr=subprocess.STDOUT,
-                **procs.popen_group_kwargs())
+            proc = _start(command, env, cwd, log_handle, container)
         except OSError as exc:
             hint = " (Access is denied: check the antivirus / folder permissions)" if isinstance(
                 exc, PermissionError) else ""
@@ -308,9 +324,11 @@ def run_game(command: Sequence[str], *, env: Mapping[str, str] | None = None, cw
                 on_poll(elapsed)
                 time.sleep(poll_s)
         except BaseException:
+            container.kill()
             procs.kill_process_tree(proc, also_names=kill_names)
             raise
     finally:
+        container.close()
         if log_handle is not None:
             log_handle.close()
     return GameRun(returncode=int(returncode), duration_s=elapsed, output_tail=_tail(log_path))
@@ -321,19 +339,19 @@ def run_loader(command: Sequence[str], *, env: Mapping[str, str] | None = None, 
                on_poll: Callable[[float], None] = lambda elapsed: None, log_path: Path | None = None,
                poll_s: float = 1.0, kill_names: Sequence[str] = (),
                is_game_running: Callable[[], bool | None] = procs.is_cs2_running,
-               appear_timeout_s: float = 120.0) -> GameRun:
+               appear_timeout_s: float = 120.0,
+               contain: Callable[[], procs.Containment] = procs.DieWithParent) -> GameRun:
     """Like :func:`run_game` for a *loader* (HLAE): ``command`` starts the game and exits, so the session lasts
-    until the game process itself is gone. Same progress / cancellation / watchdog contract."""
+    until the game process itself is gone. Same progress / cancellation / watchdog contract. The game is
+    started by the loader, so it is in the loader's Job Object on Windows and dies with demoreel as well."""
     log_handle = None
+    container = contain()
     try:
         if log_path is not None:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_handle = open(log_path, "wb")  # noqa: SIM115 - closed in the finally below
         try:
-            proc = subprocess.Popen(
-                list(command), env=dict(env) if env is not None else None, cwd=str(cwd) if cwd else None,
-                stdin=subprocess.DEVNULL, stdout=log_handle or subprocess.DEVNULL, stderr=subprocess.STDOUT,
-                **procs.popen_group_kwargs())
+            proc = _start(command, env, cwd, log_handle, container)
         except OSError as exc:
             raise RenderError(f"Could not start HLAE: {exc}") from exc
 
@@ -360,9 +378,11 @@ def run_loader(command: Sequence[str], *, env: Mapping[str, str] | None = None, 
                 on_poll(elapsed)
                 time.sleep(poll_s)
         except BaseException:
+            container.kill()
             procs.kill_process_tree(proc, also_names=kill_names)
             raise
     finally:
+        container.close()
         if log_handle is not None:
             log_handle.close()
     return GameRun(returncode=0, duration_s=elapsed, output_tail=_tail(log_path))

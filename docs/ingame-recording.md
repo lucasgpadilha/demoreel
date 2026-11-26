@@ -133,12 +133,33 @@ Everything below is a port of CS Demo Manager (file names refer to its repositor
    Linux) and `Game<TAB>csgo/csdm` is inserted ahead of `Game<TAB>csgo` in `game/csgo/gameinfo.gi`, which makes
    the game load CSDM's `server` library in place of its own (`cs2-server-plugin.ts`). The original
    `gameinfo.gi` is saved as `gameinfo.gi.demoreel-backup` first and restored when the game exits, whatever
-   happened. If demoreel itself is killed in between, the next run restores it before doing anything else
-   (or simply deletes the backup when the file is already clean, e.g. after a Steam update).
+   happened inside demoreel (an error, a cancellation, Ctrl+C).
    The plugin keeps the state of its panels in `game/csgo/cfg/csdm_settings.json` and writes it back whenever a
    setting changes, which hiding the panels does. That file is CS Demo Manager's, so it is saved
    (`csdm_settings.json.demoreel-backup`) before the game starts and put back once it has quit: the same bytes,
-   or no file when there was none. A run that was killed is undone by the next one, as for `gameinfo.gi`.
+   or no file when there was none.
+
+   **When demoreel itself is killed mid-recording** (the window closed, the process ended, the machine shut
+   down), nothing of demoreel runs any more, so three things cover it:
+   - **the game dies with it.** The game is started inside a Windows Job Object that closes when the demoreel
+     process ends, however it ends, and takes the game (and what the game or HLAE started) with it; on Linux
+     the game's launcher gets `PR_SET_PDEATHSIG`. A game left recording on its own is not possible on
+     Windows; on Linux what the Steam runtime starts inside its container is not verified.
+   - **a journal.** Before anything in the CS2 folder changes, `game/csgo/demoreel-session.json` is written:
+     what the plugin folder and the two raw folders held before the recording. It is deleted when everything
+     is back as it was (and kept if something could not be removed, a file the game held locked).
+   - **recovery at start-up.** `demoreel serve`, `demoreel worker` and `demoreel doctor` put the folder back
+     when they start - `gameinfo.gi`, `csdm_settings.json`, the plugin files, that recording's raw frames and
+     sound, its log - and so does the next recording before it begins. Only when it is safe: no recording runs
+     with this CS2 (both recording locks are free) and the game is closed. Until then the renderer's
+     availability (`demoreel doctor`, `GET /api/v1/capabilities`) says the folder is still changed: **do not
+     start CS2 from Steam meanwhile**.
+
+   `demoreel serve` stopping (Ctrl+C) asks its workers to stop and gives them 30 s: a recording in progress
+   is cancelled at its next check, closes the game, puts the folder back and goes back to the queue, where it
+   runs again with the next worker. A worker started on its own does the same on Ctrl+C, SIGTERM or
+   Ctrl+Break; a second signal stops it at once (still through its clean-up). Closing the console window or
+   logging off gives Windows' few seconds at most, which the Job Object and the start-up recovery are for.
 4. **Launch.** `cs2.exe -insecure -novid +playdemo <demo> -width W -height H -sw` (Linux: the same through
    `SteamLinuxRuntime_sniper/_v2-entry-point --verb=waitforexitandrun -- game/cs2.sh`), with `USRLOCALCSGO`
    pointing to `<data_dir>/ingame/cfg` so your own CS2 video settings and binds are not touched
@@ -151,8 +172,15 @@ Everything below is a port of CS Demo Manager (file names refer to its repositor
 
 Files demoreel touches inside the CS2 folder, all removed/restored afterwards: `game/csgo/gameinfo.gi`
 (+ `.demoreel-backup`), `game/csgo/cfg/csdm_settings.json` (written by the plugin; + `.demoreel-backup`),
-`game/csgo/csdm/`, `game/csgo/movie/<timestamp>/<n>-sequence.wav`,
-`game/bin/<platform>/csdm.log` (the plugin's log, deleted before each run and quoted in error messages).
+`game/csgo/demoreel-session.json` (the journal), `game/csgo/csdm/`, `game/csgo/movie/<timestamp>/<n>-sequence.wav`,
+`game/bin/<platform>/csdm.log` (the plugin's log, quoted in error messages; after a failure it is copied to
+`<data_dir>/ingame/last-csdm.log`, outside the game).
+
+Raw files are told apart from anybody else's by when their folder appeared: the top-level entries of
+`csdm/movie` and `csgo/movie` that existed before the recording (CS Demo Manager names its takes like
+demoreel and may keep them; `csgo/movie` is where anybody's `startmovie` writes, empty folders included) are
+never read as demoreel's and never deleted. In the folders that appeared during the recording only files named
+like its takes (`<n>-sequence…`) are deleted, then the folders left empty.
 
 ## Known pitfalls
 
@@ -202,16 +230,23 @@ Files demoreel touches inside the CS2 folder, all removed/restored afterwards: `
   search path is already in `gameinfo.gi`, demoreel leaves the file exactly as it found it. The plugin is pointed
   at an unused WebSocket port so an open CSDM app cannot drive the recording. Your panel settings
   (`game/csgo/cfg/csdm_settings.json`) are put back after each recording, so the voice indicator and the
-  buttons overlay are as you left them the next time you watch a demo from CS Demo Manager.
+  buttons overlay are as you left them the next time you watch a demo from CS Demo Manager. Its own copy of
+  the plugin (`game/csgo/csdm/bin`, and `vulkan` on Linux) is renamed to `bin.demoreel-backup` while demoreel's
+  is in place and renamed back afterwards; its last `csdm.log`, its raw files in `csdm/movie` and the files the
+  game generated for it in `csdm/` are left as they were.
 - **Camera**: `pov_steamid = null` segments are not given a camera; the game shows its default spectator view.
   If the POV player is dead at the clip start the game may pick another camera.
 - **Antivirus / permissions**: the CS2 folder must be writable by the user running demoreel.
-- **Crash leftovers**: `gameinfo.gi` is restored automatically on the next run. To do it by hand, copy
-  `gameinfo.gi.demoreel-backup` over `gameinfo.gi` and delete `game/csgo/csdm/`, or verify the game files in
-  Steam. The plugin's settings come back the same way: by hand, copy
+- **Crash leftovers**: put back automatically when `demoreel serve`, `demoreel worker` or `demoreel doctor`
+  starts, and before the next recording (see [Plugin](#how-it-works), step 3). To do it by hand, with CS2
+  closed: copy `gameinfo.gi.demoreel-backup` over `gameinfo.gi`, delete `game/csgo/csdm/bin` and rename
+  `bin.demoreel-backup` back to `bin` if there is one (CS Demo Manager's), delete `demoreel-session.json` - or
+  verify the game files in Steam. The plugin's settings come back the same way: copy
   `game/csgo/cfg/csdm_settings.json.demoreel-backup` over `csdm_settings.json` (an empty backup means there was
-  no file: delete both). Settings changed in CS Demo Manager between the crash and the next recording are
-  replaced by that older copy.
+  no file: delete both). Settings changed in CS Demo Manager between the crash and the recovery are
+  replaced by that older copy. A `gameinfo.gi` left empty or cut short by an interrupted write is put back
+  from the backup too; when neither is usable both are left alone and the recovery says to verify the game
+  files in Steam.
 
 ## Linux notes
 
@@ -307,7 +342,8 @@ The first run also found one defect, now fixed and covered by a test: CS2 writes
    as before (or still absent) with no `.demoreel-backup` next to it; CS2 starts normally from Steam afterwards.
 5. Then try `--top 3` (several takes: the demo restarts between them) and a cancel in the middle (Ctrl+C or
    cancelling the job): the game must close and `gameinfo.gi` must be clean.
-6. If it fails, the error message quotes the end of `game/bin/win64/csdm.log` (`linuxsteamrt64` on Linux).
+6. If it fails, the error message quotes the end of `game/bin/win64/csdm.log` (`linuxsteamrt64` on Linux),
+   which is kept as `<data_dir>/ingame/last-csdm.log`.
    `[<tick>] Executing: startmovie 1-sequence` proves the actions file was loaded; no log at all means the
    plugin did not load (wrong build for this CS2 version, or `gameinfo.gi` not patched). Re-run with
    `options.extra.ingame_keep_raw = true` to inspect the raw files in `game/csgo/csdm/movie/`.

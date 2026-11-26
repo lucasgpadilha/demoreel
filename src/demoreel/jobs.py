@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import socket
+import threading
 import time
 import traceback
 from collections.abc import Callable
@@ -31,6 +33,20 @@ log = logging.getLogger("demoreel.jobs")
 STALE_AFTER = timedelta(minutes=3)
 MAX_ATTEMPTS = 2
 TERMINAL = {"succeeded", "failed", "canceled"}
+
+# Set when this worker process is asked to stop (``demoreel serve`` shutting down, Ctrl+C, SIGTERM, Ctrl+Break):
+# the running job sees itself cancelled at its next check - a recording closes the game and puts the CS2 folder
+# back - and goes back to the queue instead of ending as canceled; no new job is taken.
+_STOP = threading.Event()
+STOPPED_MESSAGE = "Interrupted: the worker was stopped. It runs again when a worker is up."
+
+
+def request_stop() -> None:
+    _STOP.set()
+
+
+def stopping() -> bool:
+    return _STOP.is_set()
 
 
 class JobCancelled(Exception):
@@ -60,6 +76,9 @@ class JobContext:
                 heartbeat_at=now()))
 
     def cancelled(self) -> bool:
+        """Cancelled by the organiser - or this worker is stopping, which ends the job the same way."""
+        if _STOP.is_set():
+            return True
         with session_scope() as s:
             return bool(s.scalar(select(Job.cancel_requested).where(Job.id == self.job_id)))
 
@@ -249,6 +268,8 @@ def _run(job: Job) -> bool:
         result = fn(ctx)
     except JobCancelled:
         status, error = "canceled", "Canceled"
+        if _STOP.is_set() and _defer(job.id, STOPPED_MESSAGE):
+            return True  # not cancelled by anybody: the worker is stopping, the job waits for the next one
     except JobDeferred as exc:
         if _defer(job.id, str(exc)):
             return False  # nothing ran: the caller waits a moment before looking at the queue again
@@ -297,17 +318,54 @@ def worker_loop(capabilities: list[str], poll_s: float = 1.0, stop: Callable[[],
     worker_id = f"{socket.gethostname()}:{os.getpid()}"
     log.info("worker %s up, capabilities=%s", worker_id, capabilities)
     last_sweep = 0.0
-    while not stop():
+    while not stop() and not _STOP.is_set():
         if time.monotonic() - last_sweep > 60:
             requeue_stale()
             last_sweep = time.monotonic()
         if not run_one(worker_id, capabilities):
-            time.sleep(poll_s)
+            _STOP.wait(poll_s)
+    log.info("worker %s stopped", worker_id)
 
 
-def worker_process_main(capabilities: list[str]) -> None:
-    """Entry point for worker subprocesses."""
+STOP_SIGNALS = ("SIGINT", "SIGTERM", "SIGBREAK")  # SIGBREAK: Ctrl+Break on Windows
+
+
+def install_stop_handlers(signals: tuple[str, ...] = STOP_SIGNALS) -> list[str]:
+    """First signal: stop gracefully (see ``_STOP``). Second: stop now - ``KeyboardInterrupt``, which still runs
+    every ``finally`` on its way out, so the game is closed and the CS2 folder put back. Returns the signals
+    handled here (only the main thread can set handlers; others are skipped)."""
+
+    def handler(signum: int, frame: Any) -> None:
+        if _STOP.is_set():
+            raise KeyboardInterrupt
+        log.warning("worker stopping (signal %s): the running job is cancelled and queued again; signal once "
+                    "more to stop at once", signum)
+        _STOP.set()
+
+    handled = []
+    for name in signals:
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, handler)
+            handled.append(name)
+        except (ValueError, OSError):  # not the main thread, or not a signal this system lets one handle
+            continue
+    return handled
+
+
+def worker_process_main(capabilities: list[str], stop_event: Any = None) -> None:
+    """Entry point for worker processes. ``stop_event`` (a ``multiprocessing`` event) is how ``demoreel serve``
+    asks its workers to stop before it ends them."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    install_stop_handlers()
+    if stop_event is not None:
+        def watch() -> None:
+            stop_event.wait()
+            _STOP.set()
+
+        threading.Thread(target=watch, name="demoreel-stop", daemon=True).start()
     try:
         worker_loop(capabilities)
     except KeyboardInterrupt:
